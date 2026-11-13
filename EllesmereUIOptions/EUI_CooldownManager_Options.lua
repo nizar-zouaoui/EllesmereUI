@@ -1448,6 +1448,47 @@ initFrame:SetScript("OnEvent", function(self)
                             y = y - h
                         end
 
+                        local healthRow
+                        healthRow, h = W:DualRow(parent, y,
+                            { type = "dropdown", text = "Health",
+                              values = { disabled = "Ignore", below = "Below", above = "Above" },
+                              order = { "disabled", "below", "above" },
+                              tooltip = "Only glow while your health is below or above the selected percentage.",
+                              getValue = function()
+                                  if tonumber(entry.healthAbove) then return "above" end
+                                  if tonumber(entry.healthBelow) then return "below" end
+                                  return "disabled"
+                              end,
+                              setValue = function(v)
+                                  if v == "above" then
+                                      entry.healthAbove = tonumber(entry.healthAbove) or tonumber(entry.healthBelow) or 35
+                                      entry.healthBelow = nil
+                                  elseif v == "below" then
+                                      entry.healthBelow = tonumber(entry.healthBelow) or tonumber(entry.healthAbove) or 35
+                                      entry.healthAbove = nil
+                                  else
+                                      entry.healthBelow = nil
+                                      entry.healthAbove = nil
+                                  end
+                                  Refresh()
+                                  EllesmereUI:RefreshPage()
+                              end },
+                            { type = "slider", text = "Health %",
+                              min = 1, max = 100, step = 1,
+                              disabled = function()
+                                  return not (tonumber(entry.healthBelow) or tonumber(entry.healthAbove))
+                              end,
+                              disabledTooltip = "Choose Below or Above first",
+                              getValue = function()
+                                  return tonumber(entry.healthBelow) or tonumber(entry.healthAbove) or 35
+                              end,
+                              setValue = function(v)
+                                  if tonumber(entry.healthAbove) then entry.healthAbove = v
+                                  else entry.healthBelow = v end
+                                  Refresh()
+                              end })
+                        y = y - h
+
                         -- Helper: resolve current glow color and restart preview if active
                         local pvKey = assignKey .. "_" .. aIdx
                         local function RefreshPreviewGlow()

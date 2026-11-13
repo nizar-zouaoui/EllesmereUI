@@ -164,6 +164,7 @@ local _cachedBG = nil     -- cached barGlows reference (refreshed on SetupOverla
 --  Lua never reads the count, just forwards it.
 -------------------------------------------------------------------------------
 local stackGates = {}  -- [key] = { gate,mask,fill, gate2,mask2,fill2, pad, threshold, operator, closeValue, openValue, closeValue2 }
+local healthGates = {}
 
 local function StackGateSize(overlay)
     local w, h = overlay:GetWidth(), overlay:GetHeight()
@@ -200,11 +201,12 @@ local function StackGlowMatches(value, operator, threshold)
     return value >= threshold
 end
 
-local function EnsureStackGate(overlay, key)
-    local st = stackGates[key]
+local function EnsureStackGate(overlay, key, store)
+    store = store or stackGates
+    local st = store[key]
     if not st then
         st = {}
-        stackGates[key] = st
+        store[key] = st
         local w, h = StackGateSize(overlay)
         local pad = math.ceil(math.max(w, h) * 0.4)
         if pad < 12 then pad = 12 end
@@ -219,8 +221,8 @@ end
 -- StackGlow_Configure's edge math exactly: lower bounds park the mask left
 -- and open at max; upper bounds open at min and park right; equality
 -- intersects one lower + one upper gate (both masks applied to the glow).
-local function ConfigureStackGate(overlay, key, threshold, operator)
-    local st = EnsureStackGate(overlay, key)
+local function ConfigureStackGate(overlay, key, threshold, operator, store)
+    local st = EnsureStackGate(overlay, key, store)
     if st.threshold == threshold and st.operator == operator then return st end
     st.threshold, st.operator = threshold, operator
 
@@ -441,6 +443,8 @@ local UpdateOverlayVisuals  -- forward: defined below
 local usableEventsOn = false
 local usablePowerEventsOn = false
 local usableFlush, usableEvents  -- built on the first Glow When Usable entry
+local healthEventsOn = false
+local healthFlush, healthEvents
 
 -- Blizzard only guarantees GetSpellCooldown's isOnGCD inside the cooldown event itself:
 -- a frame later, at the end of a GCD, it reads as a real cooldown for ~0.25s. So whether
@@ -519,6 +523,32 @@ local function SyncUsableEvents(on, powerAware)
     end
 end
 
+local function SyncHealthEvents(on)
+    if on == healthEventsOn then return end
+    healthEventsOn = on
+    if on then
+        if not healthEvents then
+            healthFlush = ns.TakeShell()
+            healthFlush:Hide()
+            healthFlush:SetScript("OnUpdate", function(self)
+                self:Hide()
+                if UpdateOverlayVisuals then UpdateOverlayVisuals() end
+            end)
+            healthEvents = ns.TakeShell()
+            healthEvents:SetScript("OnEvent", function(_, event, unit)
+                if (event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH")
+                    and unit ~= "player" then return end
+                healthFlush:Show()
+            end)
+        end
+        healthEvents:RegisterUnitEvent("UNIT_HEALTH", "player")
+        healthEvents:RegisterUnitEvent("UNIT_MAXHEALTH", "player")
+    elseif healthEvents then
+        healthEvents:UnregisterAllEvents()
+        healthFlush:Hide()
+    end
+end
+
 -- Existing position keys ("<bar>_<button>") become ability keys once per spec,
 -- by the ability saved with each entry. An entry saved before actionSpellID
 -- existed stays on its position key: the button's ability right now (a form or
@@ -593,7 +623,7 @@ end
 local function BindOverlays(bg)
     local stackSids
     local glowSids = {}  -- every assigned glow's spellID, for AnyTargetAura
-    local anyHero, anyUsable, anySpellKey, anyPowerAware
+    local anyHero, anyUsable, anySpellKey, anyHealth, anyPowerAware
     local abilityButtons  -- ScanActionButtons(), built on the first ability key
     wipe(glowedAbilities)
 
@@ -656,6 +686,10 @@ local function BindOverlays(bg)
                         local csid = type(cond) == "table" and tonumber(cond.spellID)
                         if csid and csid > 0 then glowSids[csid] = true end
                         if entry.heroTree and not EllesmereUI.IS_FOREVER then anyHero = true end
+                        if (tonumber(entry.healthBelow) and tonumber(entry.healthBelow) > 0)
+                            or (tonumber(entry.healthAbove) and tonumber(entry.healthAbove) > 0) then
+                            anyHealth = true
+                        end
                         if entry.mode == "USABLE" then
                             anyUsable = true
                             if overlay._requirePower then anyPowerAware = true end
@@ -679,7 +713,7 @@ local function BindOverlays(bg)
             lastStates[key] = nil
         end
     end
-    return stackSids, glowSids, anyHero, anyUsable, anySpellKey, anyPowerAware
+    return stackSids, glowSids, anyHero, anyUsable, anySpellKey, anyPowerAware, anyHealth
 end
 
 -- Ability-keyed glows follow the bars: a stance or form change, a moved or
@@ -732,6 +766,7 @@ local function SetupOverlays()
         ns._barGlowStackSids = nil
         ns._barGlowAnyHero = nil
         SyncUsableEvents(false, false)
+        SyncHealthEvents(false)
         SyncRebindEvents(false)
         ns._bgWantTargetAuras = false
         if ns.SetBarGlowTargetAuras then ns.SetBarGlowTargetAuras(false) end
@@ -744,12 +779,13 @@ local function SetupOverlays()
     -- applications at all (EUI_CDM_HookViewers.lua): the set of spellIDs
     -- stack-gated entries name, nil when there are none. Only frames resolving
     -- to one of these ids pay the applications read; no gated entry = no reads.
-    local stackSids, glowSids, anyHero, anyUsable, anySpellKey, anyPowerAware = BindOverlays(bg)
+    local stackSids, glowSids, anyHero, anyUsable, anySpellKey, anyPowerAware, anyHealth = BindOverlays(bg)
     ns._barGlowStackSids = stackSids
     -- A hero-talent-gated glow exists: talent changes re-run the glow pass.
     ns._barGlowAnyHero = anyHero
     -- A Glow When Usable entry exists: its own cooldown / usability edges listen.
     SyncUsableEvents(anyUsable == true, anyPowerAware == true)
+    SyncHealthEvents(anyHealth == true)
     -- An ability-keyed glow exists: bar changes rebind it.
     SyncRebindEvents(anySpellKey == true)
     -- Listen to target auras only while some glow tracks a non-self aura (EllesmereUICdmHooks).
@@ -791,8 +827,9 @@ UpdateOverlayVisuals = function()
             else
                 shouldGlow = auraActive
             end
-            -- Second-buff (And) and hero talent conditions (EllesmereUICdmBarGlowConditions.lua)
-            if entry.andMode or entry.heroTree then
+            -- Health, second-buff (And), and hero talent conditions
+            -- (EllesmereUICdmBarGlowConditions.lua)
+            if entry.andMode or entry.heroTree or entry.healthBelow or entry.healthAbove then
                 shouldGlow = ns.BarGlowCombine(entry, shouldGlow, ns._tickBlizzActiveCache)
             end
 
@@ -843,6 +880,18 @@ UpdateOverlayVisuals = function()
                 end
             end
 
+            -- Secret player health is filtered by a native StatusBar mask.
+            -- BarGlowCombine fails open for this case so Lua never compares
+            -- the opaque health values itself.
+            local healthGate
+            if shouldGlow and (entry.healthBelow or entry.healthAbove) and ns.BarGlowHealthSecret then
+                local threshold, operator, pct = ns.BarGlowHealthSecret(entry)
+                if threshold and operator then
+                    healthGate = ConfigureStackGate(overlay, key, threshold, operator, healthGates)
+                    healthGate.gate:SetValue(pct)
+                end
+            end
+
             -- Only update start/stop on state change (avoids restarting animations)
             if shouldGlow ~= lastStates[key] then
                 lastStates[key] = shouldGlow
@@ -876,13 +925,22 @@ UpdateOverlayVisuals = function()
                     overlay:SetFrameLevel(glowParent:GetFrameLevel() + ((isFill and gpfc) and 12 or 15))
                     -- The fill opacity rides opts only for Blackout (fresh table per
                     -- start: the combat-gate record keeps opts by reference).
-                    if gateSt then
+                    local maskWith = gateSt and gateSt.mask
+                    local maskWith2 = gateSt and gateSt.mask2
+                    if healthGate then
+                        if maskWith then
+                            maskWith2 = maskWith2 or healthGate.mask
+                        else
+                            maskWith = healthGate.mask
+                        end
+                    end
+                    if gateSt or healthGate then
                         -- Both gate masks travel as data (mask2 is nil unless the
                         -- operator needs the upper gate): the Show Glows Only in
                         -- Combat replay restarts from the recorded opts, so a mask
                         -- bound out here would be missing on every texture that
                         -- replay creates fresh.
-                        StartNativeGlow(overlay, style, cr, cg, cb, { maskWith = gateSt.mask, maskWith2 = gateSt.mask2,
+                        StartNativeGlow(overlay, style, cr, cg, cb, { maskWith = maskWith, maskWith2 = maskWith2,
                             alpha = isFill and entry.glowAlpha or nil })
                     else
                         StartNativeGlow(overlay, style, cr, cg, cb, isFill and { alpha = entry.glowAlpha } or nil)
