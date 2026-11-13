@@ -66,19 +66,29 @@ local function HealthCurve(above, threshold)
     local key = (above and "above:" or "below:") .. threshold
     local curve = healthCurves[key]
     if curve then return curve end
-    curve = C_CurveUtil.CreateCurve()
-    curve:SetType(Enum.LuaCurveType.Step)
+    local ok
+    ok, curve = pcall(C_CurveUtil.CreateCurve)
+    if not ok or not curve then return nil end
+    ok = pcall(curve.SetType, curve, Enum.LuaCurveType.Step)
+    if not ok then return nil end
     if above then
-        curve:AddPoint(0, 0)
-        curve:AddPoint(threshold / 100, 0)
+        ok = pcall(curve.AddPoint, curve, 0, 0)
+        if not ok then return nil end
+        ok = pcall(curve.AddPoint, curve, threshold / 100, 0)
+        if not ok then return nil end
         if threshold < 100 then
-            curve:AddPoint(math.min(1, (threshold + 0.0001) / 100), 1)
-            curve:AddPoint(1, 1)
+            ok = pcall(curve.AddPoint, curve, math.min(1, (threshold + 0.0001) / 100), 1)
+            if not ok then return nil end
+            ok = pcall(curve.AddPoint, curve, 1, 1)
+            if not ok then return nil end
         end
     else
-        curve:AddPoint(0, 1)
-        curve:AddPoint(threshold / 100, 0)
-        curve:AddPoint(1, 0)
+        ok = pcall(curve.AddPoint, curve, 0, 1)
+        if not ok then return nil end
+        ok = pcall(curve.AddPoint, curve, threshold / 100, 0)
+        if not ok then return nil end
+        ok = pcall(curve.AddPoint, curve, 1, 0)
+        if not ok then return nil end
     end
     healthCurves[key] = curve
     return curve
@@ -88,7 +98,9 @@ function ns.BarGlowHealthNative(entry)
     local threshold = tonumber(entry.healthAbove) or tonumber(entry.healthBelow)
     local curve = threshold and HealthCurve(entry.healthAbove ~= nil, threshold)
     if not (curve and UnitHealthPercent) then return false end
-    return true, UnitHealthPercent("player", false, curve)
+    local ok, value = pcall(UnitHealthPercent, "player", false, curve)
+    if not ok then return false end
+    return true, value
 end
 
 function ns.BarGlowHealthPass(entry)

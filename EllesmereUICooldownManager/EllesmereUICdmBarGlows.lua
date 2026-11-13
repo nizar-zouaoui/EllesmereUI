@@ -174,16 +174,22 @@ local function StackGateSize(overlay)
 end
 
 local function NewStackGate(overlay, pad)
-    local gate = CreateFrame("StatusBar", nil, overlay)
-    gate:SetPoint("TOPLEFT", overlay, "TOPLEFT", -pad, pad)
-    gate:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT", pad, -pad)
-    gate:SetStatusBarTexture("Interface\\Buttons\\WHITE8x8")
-    local fill = gate:GetStatusBarTexture()
-    if fill then fill:SetAlpha(0) end
-    gate:EnableMouse(false)
-    local mask = gate:CreateMaskTexture()
-    mask:SetTexture("Interface\\Buttons\\WHITE8x8",
-        "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE", "NEAREST")
+    local ok, gate, mask, fill = pcall(function()
+        local statusBar = CreateFrame("StatusBar", nil, overlay)
+        if not statusBar then return nil end
+        statusBar:SetPoint("TOPLEFT", overlay, "TOPLEFT", -pad, pad)
+        statusBar:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT", pad, -pad)
+        statusBar:SetStatusBarTexture("Interface\\Buttons\\WHITE8x8")
+        local statusBarFill = statusBar:GetStatusBarTexture()
+        if statusBarFill then statusBarFill:SetAlpha(0) end
+        statusBar:EnableMouse(false)
+        local statusBarMask = statusBar:CreateMaskTexture()
+        if not statusBarMask then return nil end
+        statusBarMask:SetTexture("Interface\\Buttons\\WHITE8x8",
+            "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE", "NEAREST")
+        return statusBar, statusBarMask, statusBarFill
+    end)
+    if not ok then return nil end
     return gate, mask, fill
 end
 
@@ -212,6 +218,10 @@ local function EnsureStackGate(overlay, key, store)
         if pad < 12 then pad = 12 end
         st.pad = pad
         st.gate, st.mask, st.fill = NewStackGate(overlay, pad)
+        if not st.gate or not st.mask then
+            store[key] = nil
+            return nil
+        end
         SizeStackGateMasks(st, w, h)
     end
     return st
@@ -223,6 +233,10 @@ end
 -- intersects one lower + one upper gate (both masks applied to the glow).
 local function ConfigureStackGate(overlay, key, threshold, operator, store)
     local st = EnsureStackGate(overlay, key, store)
+    if not st or not st.gate or not st.mask then
+        if store then store[key] = nil else stackGates[key] = nil end
+        return nil
+    end
     if st.threshold == threshold and st.operator == operator then return st end
     st.threshold, st.operator = threshold, operator
 
@@ -357,17 +371,19 @@ local function ButtonSpellID(btn)
     return sid and LiveSpell(sid)
 end
 
-local function GetBarGlowResourcePolicy()
+local function GetBarGlowResourcePolicy(create)
     if not ns.GetSpecProfilesForProfile or not ns.GetActiveProfileName then return nil end
     local profileName = ns.GetActiveProfileName()
-    ns.GetSpecProfilesForProfile(profileName)
+    if create then ns.GetSpecProfilesForProfile(profileName) end
     local sa = EllesmereUIDB and EllesmereUIDB.spellAssignments
     local bucket = sa and sa.profiles and sa.profiles[profileName]
     if not bucket then return nil end
     if type(bucket.barGlowResourcePolicy) ~= "table" then
+        if not create then return nil end
         bucket.barGlowResourcePolicy = { all = false, specs = {}, spells = {}, excluded = {} }
     end
     local policy = bucket.barGlowResourcePolicy
+    if not create then return policy end
     policy.specs = type(policy.specs) == "table" and policy.specs or {}
     policy.spells = type(policy.spells) == "table" and policy.spells or {}
     policy.excluded = type(policy.excluded) == "table" and policy.excluded or {}
@@ -382,13 +398,16 @@ end
 function ns.BarGlowResourceScope(sid)
     local key = ResourceSpellKey(sid)
     local specKey = ns.GetActiveSpecKey and ns.GetActiveSpecKey()
-    local policy = GetBarGlowResourcePolicy()
+    local policy = GetBarGlowResourcePolicy(false)
     if not key or not specKey or not policy then return "legacy" end
-    local excluded = policy.excluded[specKey]
+    local excludedBySpec = type(policy.excluded) == "table" and policy.excluded or nil
+    local excluded = excludedBySpec and excludedBySpec[specKey]
     if excluded and excluded[key] then return "legacy" end
-    local spells = policy.spells[specKey]
+    local spellsBySpec = type(policy.spells) == "table" and policy.spells or nil
+    local spells = spellsBySpec and spellsBySpec[specKey]
     if spells and spells[key] then return "spell" end
-    if policy.specs[specKey] then return "spec" end
+    local specs = type(policy.specs) == "table" and policy.specs or nil
+    if specs and specs[specKey] then return "spec" end
     if policy.all then return "all" end
     return "legacy"
 end
@@ -396,7 +415,7 @@ end
 function ns.SetBarGlowResourceScope(sid, scope)
     local key = ResourceSpellKey(sid)
     local specKey = ns.GetActiveSpecKey and ns.GetActiveSpecKey()
-    local policy = GetBarGlowResourcePolicy()
+    local policy = GetBarGlowResourcePolicy(true)
     if not key or not specKey or not policy then return end
     local spells = policy.spells[specKey]
     if type(spells) ~= "table" then spells = {}; policy.spells[specKey] = spells end
@@ -430,8 +449,9 @@ function ns.BarGlowRequirePower(sid, entry)
     if scope ~= "legacy" then return true end
     local key = ResourceSpellKey(sid)
     local specKey = ns.GetActiveSpecKey and ns.GetActiveSpecKey()
-    local policy = GetBarGlowResourcePolicy()
-    local excluded = policy and specKey and policy.excluded[specKey]
+    local policy = GetBarGlowResourcePolicy(false)
+    local excludedBySpec = policy and type(policy.excluded) == "table" and policy.excluded
+    local excluded = excludedBySpec and specKey and excludedBySpec[specKey]
     if key and excluded and excluded[key] then return false end
     return entry and entry.requirePower == true or false
 end
@@ -445,6 +465,12 @@ local usablePowerEventsOn = false
 local usableFlush, usableEvents  -- built on the first Glow When Usable entry
 local healthEventsOn = false
 local healthFlush, healthEvents
+local function SafeRegisterEvent(frame, event)
+    pcall(frame.RegisterEvent, frame, event)
+end
+local function SafeRegisterUnitEvent(frame, event, unit)
+    pcall(frame.RegisterUnitEvent, frame, event, unit)
+end
 
 -- Blizzard only guarantees GetSpellCooldown's isOnGCD inside the cooldown event itself:
 -- a frame later, at the end of a GCD, it reads as a real cooldown for ~0.25s. So whether
@@ -507,11 +533,11 @@ local function SyncUsableEvents(on, powerAware)
                 usableFlush:Show()
             end)
         end
-        usableEvents:RegisterEvent("SPELL_UPDATE_USABLE")
-        usableEvents:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-        usableEvents:RegisterEvent("SPELL_UPDATE_CHARGES")
+        SafeRegisterEvent(usableEvents, "SPELL_UPDATE_USABLE")
+        SafeRegisterEvent(usableEvents, "SPELL_UPDATE_COOLDOWN")
+        SafeRegisterEvent(usableEvents, "SPELL_UPDATE_CHARGES")
         if powerAware then
-            usableEvents:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
+            SafeRegisterUnitEvent(usableEvents, "UNIT_POWER_FREQUENT", "player")
         else
             usableEvents:UnregisterEvent("UNIT_POWER_FREQUENT")
         end
@@ -541,8 +567,8 @@ local function SyncHealthEvents(on)
                 healthFlush:Show()
             end)
         end
-        healthEvents:RegisterUnitEvent("UNIT_HEALTH", "player")
-        healthEvents:RegisterUnitEvent("UNIT_MAXHEALTH", "player")
+        SafeRegisterUnitEvent(healthEvents, "UNIT_HEALTH", "player")
+        SafeRegisterUnitEvent(healthEvents, "UNIT_MAXHEALTH", "player")
     elseif healthEvents then
         healthEvents:UnregisterAllEvents()
         healthFlush:Hide()
@@ -677,7 +703,8 @@ local function BindOverlays(bg)
                         overlay._assignEntry = entry
                         overlay._abilitySid = abilitySid
                         local sourceSid = abilitySid or ButtonSpellID(btn)
-                        overlay._requirePower = ns.BarGlowRequirePower(sourceSid, entry)
+                        overlay._requirePower = entry.mode == "USABLE"
+                            and ns.BarGlowRequirePower(sourceSid, entry) or false
                         overlay:Show()
                         activeKeys[key] = true
                         if entry.spellID and entry.spellID > 0 then glowSids[entry.spellID] = true end
@@ -859,34 +886,38 @@ UpdateOverlayVisuals = function()
             if shouldGlow and mode ~= "MISSING" and mode ~= "USABLE" and entry.stackEnabled and spellID and spellID > 0 then
                 local threshold = tonumber(entry.stackThreshold) or 2
                 local operator = entry.stackOperator or "gte"
-                gateSt = ConfigureStackGate(overlay, key, threshold, operator)
-                -- Same sid/baseSID/linked resolution as auraActive above, so
-                -- this matches whatever spellID the entry was saved against
-                -- (a raw GetPlayerAuraBySpellID(spellID) query missed on the
-                -- override/linked-id drift these tracked buffs can have).
-                local stacks = ns._tickBlizzAuraStacks and ns._tickBlizzAuraStacks[spellID]
-                -- Secret probe FIRST: any truthy/nil/relational test on a
-                -- secret value hard-errors, not just `<`/`>=`.
-                local secret = issecretvalue and issecretvalue(stacks)
-                local feedValue
-                if secret then
-                    feedValue = stacks
-                elseif stacks == nil then
-                    feedValue = gateSt.openValue
-                elseif not StackGlowMatches(stacks, operator, threshold) then
-                    shouldGlow = false
-                else
-                    feedValue = stacks
-                end
-                if shouldGlow then
-                    gateSt.gate:SetValue(feedValue)
-                    if gateSt.gate2 then
-                        -- Explicit branch: an `and feedValue or 1` form would test
-                        -- a secret feedValue's truthiness and hard-error.
-                        if operator == "eq" then
-                            gateSt.gate2:SetValue(feedValue)
-                        else
-                            gateSt.gate2:SetValue(1)
+                local ok
+                ok, gateSt = pcall(ConfigureStackGate, overlay, key, threshold, operator)
+                if not ok then gateSt = nil end
+                if gateSt then
+                    -- Same sid/baseSID/linked resolution as auraActive above, so
+                    -- this matches whatever spellID the entry was saved against
+                    -- (a raw GetPlayerAuraBySpellID(spellID) query missed on the
+                    -- override/linked-id drift these tracked buffs can have).
+                    local stacks = ns._tickBlizzAuraStacks and ns._tickBlizzAuraStacks[spellID]
+                    -- Secret probe FIRST: any truthy/nil/relational test on a
+                    -- secret value hard-errors, not just `<`/`>=`.
+                    local secret = issecretvalue and issecretvalue(stacks)
+                    local feedValue
+                    if secret then
+                        feedValue = stacks
+                    elseif stacks == nil then
+                        feedValue = gateSt.openValue
+                    elseif not StackGlowMatches(stacks, operator, threshold) then
+                        shouldGlow = false
+                    else
+                        feedValue = stacks
+                    end
+                    if shouldGlow then
+                        pcall(gateSt.gate.SetValue, gateSt.gate, feedValue)
+                        if gateSt.gate2 then
+                            -- Explicit branch: an `and feedValue or 1` form would test
+                            -- a secret feedValue's truthiness and hard-error.
+                            if operator == "eq" then
+                                pcall(gateSt.gate2.SetValue, gateSt.gate2, feedValue)
+                            else
+                                pcall(gateSt.gate2.SetValue, gateSt.gate2, 1)
+                            end
                         end
                     end
                 end
@@ -899,8 +930,13 @@ UpdateOverlayVisuals = function()
             if shouldGlow and (entry.healthBelow or entry.healthAbove) and ns.BarGlowHealthSecret then
                 local threshold, operator, pct = ns.BarGlowHealthSecret(entry)
                 if threshold and operator then
-                    healthGate = ConfigureStackGate(overlay, key, threshold, operator, healthGates)
-                    healthGate.gate:SetValue(pct)
+                    local ok
+                    ok, healthGate = pcall(ConfigureStackGate, overlay, key, threshold, operator, healthGates)
+                    if ok and healthGate then
+                        pcall(healthGate.gate.SetValue, healthGate.gate, pct)
+                    else
+                        healthGate = nil
+                    end
                 end
             end
 
@@ -968,7 +1004,11 @@ ns.UpdateOverlayVisuals = UpdateOverlayVisuals
 
 --- Rebuild overlays and force a visual update
 function ns.RequestBarGlowUpdate()
-    SetupOverlays()
+    local ok, err = pcall(SetupOverlays)
+    if not ok then
+        ns._barGlowSetupError = err
+        return
+    end
     UpdateOverlayVisuals()
 end
 -- Alias for backward compatibility with options code
@@ -980,5 +1020,6 @@ ns.RequestUpdate = ns.RequestBarGlowUpdate
 
 -- Called once during CDMFinishSetup
 function ns.InitBarGlows()
-    SetupOverlays()
+    local ok, err = pcall(SetupOverlays)
+    if not ok then ns._barGlowSetupError = err end
 end
