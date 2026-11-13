@@ -1379,6 +1379,16 @@ initFrame:SetScript("OnEvent", function(self)
                 local curRealBtn = prefix and _G[prefix .. curBtn]
                 assignKey = ns.BarGlowAbilityKey(curRealBtn) or (curBar .. "_" .. curBtn)
             end
+            local resourceSid = cdmSid
+            if not resourceSid then
+                local spellKeySid = assignKey:match("^spell_(%d+)$")
+                resourceSid = tonumber(spellKeySid)
+                if not resourceSid then
+                    local prefix = BAR_BUTTON_PREFIXES[curBar]
+                    local curRealBtn = prefix and _G[prefix .. curBtn]
+                    resourceSid = ns.BarGlowButtonSpell(curRealBtn)
+                end
+            end
             local buffList = bg.assignments[assignKey] or {}
             parent._showRowDivider = true
 
@@ -1407,6 +1417,36 @@ initFrame:SetScript("OnEvent", function(self)
                         -- (EUI_CooldownManager_BarGlowConditions.lua)
                         local removeAIdx = aIdx
                         y = ns.BuildBarGlowWhenRow(W, parent, y, entry, Refresh, cdmSid)
+                        if entry.mode == "USABLE" then
+                            local powerRow
+                            powerRow, h = W:DualRow(parent, y,
+                                { type = "dropdown", text = "Require Resource",
+                                  values = {
+                                      legacy = "Exclude / Ignore Resource",
+                                      spell = "This Spell Only",
+                                      spec = "All Spells of This Spec",
+                                      all = "All Specs",
+                                  },
+                                  order = { "legacy", "spell", "spec", "all" },
+                                  tooltip = "Only glow when the ability has enough rage, energy, mana, or another required resource. Broader choices can be excluded per spell.",
+                                  disabled = function() return not resourceSid end,
+                                  disabledTooltip = "The ability spell could not be identified",
+                                  getValue = function()
+                                      if not resourceSid then return "legacy" end
+                                      local scope = ns.BarGlowResourceScope(resourceSid)
+                                      return scope == "legacy" and entry.requirePower == true and "spell" or scope
+                                  end,
+                                  setValue = function(v)
+                                      if resourceSid then
+                                          ns.SetBarGlowResourceScope(resourceSid, v)
+                                          entry.requirePower = nil
+                                      end
+                                      Refresh()
+                                      EllesmereUI:RefreshPage()
+                                  end },
+                                EllesmereUI.BlankRowCfg())
+                            y = y - h
+                        end
 
                         -- Helper: resolve current glow color and restart preview if active
                         local pvKey = assignKey .. "_" .. aIdx

@@ -308,13 +308,12 @@ end
 -------------------------------------------------------------------------------
 --  Glow When Usable (entry.mode == "USABLE"): the glow runs while the button's
 --  own ability could be pressed, the same test as the Cooldown State Effect
---  Hidden Until Usable: off cooldown (the GCD does not count) and usable for any
---  reason but missing power, so reactive abilities (Overpower, Revenge, Execute)
---  light up on their proc. The buff ticker is dirty-gated and stops itself, so
---  these glows carry their own edges: SPELL_UPDATE_USABLE (procs),
---  SPELL_UPDATE_COOLDOWN / SPELL_UPDATE_CHARGES (cooldown start and end),
---  registered only while such an entry exists and folded into one pass on the
---  next frame. A changed button ability rebinds through the ability-key path.
+--  Hidden Until Usable. By default, missing power is ignored so reactive
+--  abilities light up on their proc; entries can opt into requiring enough
+--  power too. The buff ticker is dirty-gated and stops itself, so these glows
+--  carry their own edges: SPELL_UPDATE_USABLE (procs), SPELL_UPDATE_COOLDOWN /
+--  SPELL_UPDATE_CHARGES (cooldown start and end), and UNIT_POWER_FREQUENT for
+--  resource-aware entries, registered only while such an entry exists.
 -------------------------------------------------------------------------------
 -- The spell on a button: a CDM icon's own spell, or what the action slot holds
 -- right now (a macro counts through its spell; items and empty slots are nil).
@@ -355,11 +354,92 @@ local function ButtonSpellID(btn)
     local sid = RawButtonSpell(btn)
     return sid and LiveSpell(sid)
 end
+
+local function GetBarGlowResourcePolicy()
+    if not ns.GetSpecProfilesForProfile or not ns.GetActiveProfileName then return nil end
+    local profileName = ns.GetActiveProfileName()
+    ns.GetSpecProfilesForProfile(profileName)
+    local sa = EllesmereUIDB and EllesmereUIDB.spellAssignments
+    local bucket = sa and sa.profiles and sa.profiles[profileName]
+    if not bucket then return nil end
+    if type(bucket.barGlowResourcePolicy) ~= "table" then
+        bucket.barGlowResourcePolicy = { all = false, specs = {}, spells = {}, excluded = {} }
+    end
+    local policy = bucket.barGlowResourcePolicy
+    policy.specs = type(policy.specs) == "table" and policy.specs or {}
+    policy.spells = type(policy.spells) == "table" and policy.spells or {}
+    policy.excluded = type(policy.excluded) == "table" and policy.excluded or {}
+    return policy
+end
+
+local function ResourceSpellKey(sid)
+    sid = tonumber(sid)
+    return sid and sid > 0 and BaseSpell(sid) or nil
+end
+
+function ns.BarGlowResourceScope(sid)
+    local key = ResourceSpellKey(sid)
+    local specKey = ns.GetActiveSpecKey and ns.GetActiveSpecKey()
+    local policy = GetBarGlowResourcePolicy()
+    if not key or not specKey or not policy then return "legacy" end
+    local excluded = policy.excluded[specKey]
+    if excluded and excluded[key] then return "legacy" end
+    local spells = policy.spells[specKey]
+    if spells and spells[key] then return "spell" end
+    if policy.specs[specKey] then return "spec" end
+    if policy.all then return "all" end
+    return "legacy"
+end
+
+function ns.SetBarGlowResourceScope(sid, scope)
+    local key = ResourceSpellKey(sid)
+    local specKey = ns.GetActiveSpecKey and ns.GetActiveSpecKey()
+    local policy = GetBarGlowResourcePolicy()
+    if not key or not specKey or not policy then return end
+    local spells = policy.spells[specKey]
+    if type(spells) ~= "table" then spells = {}; policy.spells[specKey] = spells end
+    local excluded = policy.excluded[specKey]
+    if type(excluded) ~= "table" then excluded = {}; policy.excluded[specKey] = excluded end
+    local current = ns.BarGlowResourceScope(key)
+    if scope == "all" then
+        policy.all = current == "all" and false or true
+        spells[key] = nil
+        excluded[key] = nil
+    elseif scope == "spec" then
+        policy.specs[specKey] = current == "spec" and nil or true
+        spells[key] = nil
+        excluded[key] = nil
+    elseif scope == "spell" then
+        spells[key] = current == "spell" and nil or true
+        excluded[key] = nil
+    else
+        local broad = policy.all or policy.specs[specKey]
+        if broad then
+            excluded[key] = true
+        else
+            spells[key] = nil
+            excluded[key] = nil
+        end
+    end
+end
+
+function ns.BarGlowRequirePower(sid, entry)
+    local scope = ns.BarGlowResourceScope(sid)
+    if scope ~= "legacy" then return true end
+    local key = ResourceSpellKey(sid)
+    local specKey = ns.GetActiveSpecKey and ns.GetActiveSpecKey()
+    local policy = GetBarGlowResourcePolicy()
+    local excluded = policy and specKey and policy.excluded[specKey]
+    if key and excluded and excluded[key] then return false end
+    return entry and entry.requirePower == true or false
+end
+
 -- Options: the ability a CDM icon's Glow When Usable tests ("cdm_" glows save none).
 ns.BarGlowButtonSpell = ButtonSpellID
 
 local UpdateOverlayVisuals  -- forward: defined below
 local usableEventsOn = false
+local usablePowerEventsOn = false
 local usableFlush, usableEvents  -- built on the first Glow When Usable entry
 
 -- Blizzard only guarantees GetSpellCooldown's isOnGCD inside the cooldown event itself:
@@ -389,7 +469,7 @@ local function RefreshUsableCooldowns()
 end
 
 -- The icon Hidden Until Usable shows: off cooldown (the GCD does not count) and usable.
-local function UsablePressable(sid)
+local function UsablePressable(sid, requirePower)
     local onCD = usableOnCD[sid]
     if onCD == nil then
         onCD = ReadRealCooldown(sid); usableOnCD[sid] = onCD
@@ -400,12 +480,13 @@ local function UsablePressable(sid)
         local info = C_Spell.GetSpellCooldown(sid)
         if not (info and info.isActive) then onCD = false; usableOnCD[sid] = false end
     end
-    return not onCD and not ns.CdmSpellNotUsable(sid)
+    return not onCD and not ns.CdmSpellNotUsable(sid, requirePower)
 end
 
-local function SyncUsableEvents(on)
-    if on == usableEventsOn then return end
+local function SyncUsableEvents(on, powerAware)
+    if on == usableEventsOn and powerAware == usablePowerEventsOn then return end
     usableEventsOn = on
+    usablePowerEventsOn = powerAware
     if on then
         if not usableEvents then
             usableFlush = ns.TakeShell()
@@ -416,17 +497,25 @@ local function SyncUsableEvents(on)
             end)
             usableEvents = ns.TakeShell()
             usableEvents:SetScript("OnEvent", function(_, event)
-                if event ~= "SPELL_UPDATE_USABLE" then RefreshUsableCooldowns() end
+                if event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_CHARGES" then
+                    RefreshUsableCooldowns()
+                end
                 usableFlush:Show()
             end)
         end
         usableEvents:RegisterEvent("SPELL_UPDATE_USABLE")
         usableEvents:RegisterEvent("SPELL_UPDATE_COOLDOWN")
         usableEvents:RegisterEvent("SPELL_UPDATE_CHARGES")
+        if powerAware then
+            usableEvents:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
+        else
+            usableEvents:UnregisterEvent("UNIT_POWER_FREQUENT")
+        end
     elseif usableEvents then
         usableEvents:UnregisterAllEvents()
         usableFlush:Hide()
         wipe(usableOnCD)
+        usablePowerEventsOn = false
     end
 end
 
@@ -504,7 +593,7 @@ end
 local function BindOverlays(bg)
     local stackSids
     local glowSids = {}  -- every assigned glow's spellID, for AnyTargetAura
-    local anyHero, anyUsable, anySpellKey
+    local anyHero, anyUsable, anySpellKey, anyPowerAware
     local abilityButtons  -- ScanActionButtons(), built on the first ability key
     wipe(glowedAbilities)
 
@@ -557,6 +646,8 @@ local function BindOverlays(bg)
                         overlay:SetAlpha(1)
                         overlay._assignEntry = entry
                         overlay._abilitySid = abilitySid
+                        local sourceSid = abilitySid or ButtonSpellID(btn)
+                        overlay._requirePower = ns.BarGlowRequirePower(sourceSid, entry)
                         overlay:Show()
                         activeKeys[key] = true
                         if entry.spellID and entry.spellID > 0 then glowSids[entry.spellID] = true end
@@ -565,7 +656,10 @@ local function BindOverlays(bg)
                         local csid = type(cond) == "table" and tonumber(cond.spellID)
                         if csid and csid > 0 then glowSids[csid] = true end
                         if entry.heroTree and not EllesmereUI.IS_FOREVER then anyHero = true end
-                        if entry.mode == "USABLE" then anyUsable = true end
+                        if entry.mode == "USABLE" then
+                            anyUsable = true
+                            if overlay._requirePower then anyPowerAware = true end
+                        end
                         local sid = entry.stackEnabled and entry.spellID
                         if sid and sid > 0 then
                             stackSids = stackSids or {}
@@ -585,7 +679,7 @@ local function BindOverlays(bg)
             lastStates[key] = nil
         end
     end
-    return stackSids, glowSids, anyHero, anyUsable, anySpellKey
+    return stackSids, glowSids, anyHero, anyUsable, anySpellKey, anyPowerAware
 end
 
 -- Ability-keyed glows follow the bars: a stance or form change, a moved or
@@ -637,7 +731,7 @@ local function SetupOverlays()
         end
         ns._barGlowStackSids = nil
         ns._barGlowAnyHero = nil
-        SyncUsableEvents(false)
+        SyncUsableEvents(false, false)
         SyncRebindEvents(false)
         ns._bgWantTargetAuras = false
         if ns.SetBarGlowTargetAuras then ns.SetBarGlowTargetAuras(false) end
@@ -650,12 +744,12 @@ local function SetupOverlays()
     -- applications at all (EUI_CDM_HookViewers.lua): the set of spellIDs
     -- stack-gated entries name, nil when there are none. Only frames resolving
     -- to one of these ids pay the applications read; no gated entry = no reads.
-    local stackSids, glowSids, anyHero, anyUsable, anySpellKey = BindOverlays(bg)
+    local stackSids, glowSids, anyHero, anyUsable, anySpellKey, anyPowerAware = BindOverlays(bg)
     ns._barGlowStackSids = stackSids
     -- A hero-talent-gated glow exists: talent changes re-run the glow pass.
     ns._barGlowAnyHero = anyHero
     -- A Glow When Usable entry exists: its own cooldown / usability edges listen.
-    SyncUsableEvents(anyUsable == true)
+    SyncUsableEvents(anyUsable == true, anyPowerAware == true)
     -- An ability-keyed glow exists: bar changes rebind it.
     SyncRebindEvents(anySpellKey == true)
     -- Listen to target auras only while some glow tracks a non-self aura (EllesmereUICdmHooks).
@@ -691,7 +785,7 @@ UpdateOverlayVisuals = function()
             local shouldGlow
             if mode == "USABLE" then
                 local btnSid = UsableSpellOf(overlay)
-                shouldGlow = btnSid ~= nil and UsablePressable(btnSid)
+                shouldGlow = btnSid ~= nil and UsablePressable(btnSid, overlay._requirePower == true)
             elseif mode == "MISSING" then
                 shouldGlow = not auraActive
             else
