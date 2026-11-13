@@ -47,66 +47,73 @@ end
 -------------------------------------------------------------------------------
 -- Event frame
 local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
-eventFrame:RegisterEvent("SPELLS_CHANGED")
+local function SafeRegisterEvent(frame, event)
+    pcall(frame.RegisterEvent, frame, event)
+end
+local function SafeRegisterUnitEvent(frame, event, unit)
+    pcall(frame.RegisterUnitEvent, frame, event, unit)
+end
+
+SafeRegisterEvent(eventFrame, "PLAYER_ENTERING_WORLD")
+SafeRegisterEvent(eventFrame, "PLAYER_SPECIALIZATION_CHANGED")
+SafeRegisterEvent(eventFrame, "SPELLS_CHANGED")
 -- Live override flips (proc-based hero-talent transforms): resolution memos
 -- derived from override state go stale the moment this fires.
-eventFrame:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
+SafeRegisterEvent(eventFrame, "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
 -- Only ever acted on for an override id we armed ourselves; Blizzard's own base-spell
 -- registrations dispatch here too and fall straight through.
-eventFrame:RegisterEvent("SPELL_RANGE_CHECK_UPDATE")
-eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
-eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
-eventFrame:RegisterEvent("PLAYER_LOGOUT")
-eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
-eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
-eventFrame:RegisterEvent("UPDATE_BINDINGS")
-eventFrame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
-eventFrame:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
-eventFrame:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
-eventFrame:RegisterEvent("UPDATE_OVERRIDE_ACTIONBAR")
-eventFrame:RegisterEvent("UPDATE_VEHICLE_ACTIONBAR")
-eventFrame:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
-eventFrame:RegisterEvent("UPDATE_SHAPESHIFT_FORMS")
+SafeRegisterEvent(eventFrame, "SPELL_RANGE_CHECK_UPDATE")
+SafeRegisterEvent(eventFrame, "PLAYER_REGEN_DISABLED")
+SafeRegisterEvent(eventFrame, "PLAYER_REGEN_ENABLED")
+SafeRegisterEvent(eventFrame, "ZONE_CHANGED_NEW_AREA")
+SafeRegisterEvent(eventFrame, "GROUP_ROSTER_UPDATE")
+SafeRegisterEvent(eventFrame, "PLAYER_LOGOUT")
+SafeRegisterEvent(eventFrame, "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+SafeRegisterEvent(eventFrame, "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+SafeRegisterEvent(eventFrame, "UPDATE_BINDINGS")
+SafeRegisterEvent(eventFrame, "ACTIONBAR_SLOT_CHANGED")
+SafeRegisterEvent(eventFrame, "ACTIONBAR_PAGE_CHANGED")
+SafeRegisterEvent(eventFrame, "UPDATE_BONUS_ACTIONBAR")
+SafeRegisterEvent(eventFrame, "UPDATE_OVERRIDE_ACTIONBAR")
+SafeRegisterEvent(eventFrame, "UPDATE_VEHICLE_ACTIONBAR")
+SafeRegisterEvent(eventFrame, "UPDATE_SHAPESHIFT_FORM")
+SafeRegisterEvent(eventFrame, "UPDATE_SHAPESHIFT_FORMS")
 -- Hero talent / loadout change events
-eventFrame:RegisterEvent("TRAIT_CONFIG_UPDATED")
-eventFrame:RegisterEvent("PLAYER_TALENT_UPDATE")
-eventFrame:RegisterEvent("PLAYER_PVP_TALENT_UPDATE")
-eventFrame:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
+SafeRegisterEvent(eventFrame, "TRAIT_CONFIG_UPDATED")
+SafeRegisterEvent(eventFrame, "PLAYER_TALENT_UPDATE")
+SafeRegisterEvent(eventFrame, "PLAYER_PVP_TALENT_UPDATE")
+SafeRegisterEvent(eventFrame, "ACTIVE_TALENT_GROUP_CHANGED")
 -- Viewer data landing after our init: the injection phase keys on live
 -- Blizzard frames (frames as truth), so a build that ran before the viewer
 -- populated may have injected a custom racial frame the native viewer now
 -- covers. One debounced rebuild re-evaluates; fires rarely (login, and
 -- Blizzard-side data refreshes).
-eventFrame:RegisterEvent("COOLDOWN_VIEWER_DATA_LOADED")
-eventFrame:RegisterEvent("COOLDOWN_VIEWER_TABLE_HOTFIXED")
+SafeRegisterEvent(eventFrame, "COOLDOWN_VIEWER_DATA_LOADED")
+SafeRegisterEvent(eventFrame, "COOLDOWN_VIEWER_TABLE_HOTFIXED")
 -- Cinematic/cutscene end: Blizzard restores hidden frames, so re-hide ours
-eventFrame:RegisterEvent("CINEMATIC_STOP")
-eventFrame:RegisterEvent("STOP_MOVIE")
+SafeRegisterEvent(eventFrame, "CINEMATIC_STOP")
+SafeRegisterEvent(eventFrame, "STOP_MOVIE")
 -- Equipment changes: trinket/weapon swaps update trinket frames and reanchor
-eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+SafeRegisterEvent(eventFrame, "PLAYER_EQUIPMENT_CHANGED")
 -- Visibility option events: mounted, target, instance zone changes
-eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
-eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+SafeRegisterEvent(eventFrame, "PLAYER_MOUNT_DISPLAY_CHANGED")
+SafeRegisterEvent(eventFrame, "PLAYER_TARGET_CHANGED")
 -- Resting: IsResting() has no dedicated poll, so without this the Resting
 -- axis only re-evaluated when some unrelated event above happened to fire.
-eventFrame:RegisterEvent("PLAYER_UPDATE_RESTING")
+SafeRegisterEvent(eventFrame, "PLAYER_UPDATE_RESTING")
 -- Party Mode axis: no game event; the core fires its own edge.
 if EllesmereUI.RegisterVisEdge then
     EllesmereUI.RegisterVisEdge(function() _CDMApplyVisibility() end)
 end
 -- Vehicle edges for the In Vehicle axis (player-filtered; same reasoning).
-eventFrame:RegisterUnitEvent("UNIT_ENTERED_VEHICLE", "player")
-eventFrame:RegisterUnitEvent("UNIT_EXITED_VEHICLE", "player")
+SafeRegisterUnitEvent(eventFrame, "UNIT_ENTERED_VEHICLE", "player")
+SafeRegisterUnitEvent(eventFrame, "UNIT_EXITED_VEHICLE", "player")
 -- Dragonriding visibility modes: capability edge (mount/dismount/zone) plus
 -- the airborne edge (takeoff/landing while staying mounted; probed at load
 -- in EllesmereUI_Visibility.lua -- absent = the checklist items lock).
-eventFrame:RegisterEvent("PLAYER_CAN_GLIDE_CHANGED")
+SafeRegisterEvent(eventFrame, "PLAYER_CAN_GLIDE_CHANGED")
 if EllesmereUI._hasGlidingEvent then
-    eventFrame:RegisterEvent("PLAYER_IS_GLIDING_CHANGED")
+    SafeRegisterEvent(eventFrame, "PLAYER_IS_GLIDING_CHANGED")
 end
 -- Druid travel/flight/aquatic form needs an explicit re-check for the
 -- visHideMounted option. PLAYER_MOUNT_DISPLAY_CHANGED only fires for real
@@ -116,7 +123,7 @@ end
 -- (Bear/Cat) would otherwise trigger unnecessary visibility recomputes.
 local _, _playerClassCDM = UnitClass("player")
 if _playerClassCDM == "DRUID" then
-    eventFrame:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
+    SafeRegisterEvent(eventFrame, "UPDATE_SHAPESHIFT_FORM")
 end
 
 -- Debounce token for talent-change rebuilds: rapid talent clicks collapse
