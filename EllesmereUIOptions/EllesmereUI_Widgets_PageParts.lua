@@ -480,8 +480,11 @@ end
 -- Note row: a dim aside (inside a card when its module is disabled, under a
 -- row). opts.banner: the section banner look (row background, brighter text,
 -- up to two lines), for a note the player must read before the rows below.
+-- opts.warn: a warning, one centred line in the warning red (BuildLinkRow's),
+-- a size larger than the aside, for a note at the top of a page.
 function EllesmereUI.BuildNoteRow(parent, y, text, opts)
     local banner = opts and opts.banner
+    local warn = opts and opts.warn
     local ROW_H = banner and 40 or 34
     -- The search prebuild only indexes rows: same y advance, no frames.
     if EllesmereUI._prebuilding then return y - ROW_H end
@@ -491,7 +494,13 @@ function EllesmereUI.BuildNoteRow(parent, y, text, opts)
     PP.Point(row, "TOPLEFT", parent, "TOPLEFT", EllesmereUI.CONTENT_PAD, y)
     row._skipRowDivider = true
     if banner then EllesmereUI.RowBg(row, parent) end
-    local lbl = EllesmereUI.MakeFont(row, 12, nil, 1, 1, 1)
+    local lbl = EllesmereUI.MakeFont(row, warn and 13 or 12, nil, 1, 1, 1)
+    if warn then
+        lbl:SetTextColor(0.9, 0.3, 0.3)
+        lbl:SetPoint("CENTER", row, "CENTER", 0, 0)
+        lbl:SetText(EllesmereUI.L(text))
+        return y - ROW_H
+    end
     lbl:SetAlpha(banner and 0.6 or 0.45)
     lbl:SetPoint("LEFT", row, "LEFT", 20, 0)
     if banner then
@@ -561,7 +570,7 @@ function EllesmereUI.BuildModuleCard(parent, y, W, tile, opts)
     -- The header hover fill sits on the card (built below), inside its corners.
     local hbg
 
-    opts.glyph(hdr, enabled)
+    if not EllesmereUI._prebuilding then opts.glyph(hdr, enabled) end
 
     local title = EllesmereUI.MakeFont(hdr, 14, nil, 1, 1, 1, 0.9)
     PP.Point(title, "TOPLEFT", hdr, "TOPLEFT", 50, -12)
@@ -574,6 +583,13 @@ function EllesmereUI.BuildModuleCard(parent, y, W, tile, opts)
     desc:SetWordWrap(false)
     desc:SetText(L(tile.desc or ""))
     tile._hdr, tile._descFS = hdr, desc
+
+    -- The index pass reads the header entry and an open card's rows; the rest is chrome.
+    if EllesmereUI._prebuilding then
+        y = y - MC_HEADER_H
+        if expanded then y = tile.buildContent(parent, y - 8, W, tile) - 8 end
+        return y - MC_CARD_GAP
+    end
 
     if not enabled then
         title:SetAlpha(0.4)
@@ -994,7 +1010,9 @@ end
 -------------------------------------------------------------------------------
 --  Rested Indicator row
 --  The player frame's rest marker (ZZZ text, or Blizzard's animated rest
---  icon), drawn by Unit Frames from account-wide keys. Quality of Life's
+--  icon), drawn by Unit Frames from settings that follow profiles
+--  (EllesmereUI.RestedGet / RestedSet, defined by Unit Frames; the
+--  account-wide keys while that module is off). Quality of Life's
 --  EXTRAS row and its mirror in the Unit Frames player EXTRAS are this one
 --  toggle and cog, so both pages show the same settings, whichever of the
 --  two modules is loaded.
@@ -1010,20 +1028,27 @@ local function RestPlace()
     local pf = RestPlayerFrame()
     if pf and pf._restPlace then pf._restPlace() end
 end
+local function RestGet(key)
+    if EllesmereUI.RestedGet then return EllesmereUI.RestedGet(key) end
+    return EllesmereUIDB and EllesmereUIDB[key]
+end
 local function RestSet(key, v)
+    if EllesmereUI.RestedSet then
+        EllesmereUI.RestedSet(key, v)
+        return
+    end
     if not EllesmereUIDB then EllesmereUIDB = {} end
     EllesmereUIDB[key] = v
 end
 local function RestOff()
-    return not EllesmereUIDB or EllesmereUIDB.showRestedIndicator ~= true
+    return RestGet("showRestedIndicator") ~= true
 end
 
 function EllesmereUI.RestedIndicatorCfg()
     return { type="toggle", text="Rested Indicator",
       tooltip="Displays a ZZZ indicator on your player frame when you are in a resting area.",
       getValue=function()
-        if not EllesmereUIDB then return true end
-        return EllesmereUIDB.showRestedIndicator == true
+        return RestGet("showRestedIndicator") == true
       end,
       setValue=function(v)
         RestSet("showRestedIndicator", v)
@@ -1032,36 +1057,42 @@ function EllesmereUI.RestedIndicatorCfg()
       end }
 end
 
--- Animated, Size, X / Y Offset; greyed while the indicator is off. Builds
--- nothing during the search pre-build.
+-- Anchor, Animated, Size, X / Y Offset; greyed while the indicator is off.
 function EllesmereUI.BuildRestedIndicatorCog(region)
-    if EllesmereUI._prebuilding then return end
     return EllesmereUI.BuildInlineCog(region, {
         title = "Rested Indicator",
         rows = {
+            { type="dropdown", label="Anchor",
+              values={ health="Health Bar", portrait="Portrait" }, order={ "health", "portrait" },
+              tooltip="Portrait needs a shown portrait; without one the indicator stays on the health bar.",
+              get=function() return RestGet("restedIndicatorAnchor") or "health" end,
+              set=function(v)
+                  RestSet("restedIndicatorAnchor", v)
+                  RestPlace()
+              end },
             { type="toggle", label="Animated",
               tooltip="Shows the animated rest icon from Blizzard's player frame instead of the ZZZ text.",
-              get=function() return EllesmereUIDB and EllesmereUIDB.restedIndicatorAnimated == true or false end,
+              get=function() return RestGet("restedIndicatorAnimated") == true end,
               set=function(v)
                   RestSet("restedIndicatorAnimated", v)
                   RestUpdate()
               end },
             { type="slider", label="Size", min=12, max=64, step=1,
-              disabled=function() return not (EllesmereUIDB and EllesmereUIDB.restedIndicatorAnimated == true) end,
+              disabled=function() return RestGet("restedIndicatorAnimated") ~= true end,
               disabledTooltip="Animated",
-              get=function() return (EllesmereUIDB and EllesmereUIDB.restedIndicatorAnimatedSize) or 24 end,
+              get=function() return RestGet("restedIndicatorAnimatedSize") or 24 end,
               set=function(v)
                   RestSet("restedIndicatorAnimatedSize", v)
                   RestPlace()
               end },
             { type="slider", label="X Offset", min=-50, max=50, step=1,
-              get=function() return (EllesmereUIDB and EllesmereUIDB.restedIndicatorXOffset) or 0 end,
+              get=function() return RestGet("restedIndicatorXOffset") or 0 end,
               set=function(v)
                   RestSet("restedIndicatorXOffset", v)
                   RestPlace()
               end },
             { type="slider", label="Y Offset", min=-50, max=50, step=1,
-              get=function() return (EllesmereUIDB and EllesmereUIDB.restedIndicatorYOffset) or 0 end,
+              get=function() return RestGet("restedIndicatorYOffset") or 0 end,
               set=function(v)
                   RestSet("restedIndicatorYOffset", v)
                   RestPlace()

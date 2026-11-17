@@ -499,6 +499,9 @@ end
 -- reload). CDM excludes spell-coupled subtrees (per-spell tiers, active states)
 -- and stores owned by the unlock LAYER system (positions, grow).
 local SETTING_BLACKLIST = {
+    EllesmereUIUnitFrames = {
+        restedIndicator = true, -- the Rested Indicator's per-profile settings: one look for every spec
+    },
     EllesmereUIChat = {
         showFriends = true, showDurability = true, showCopy = true,
         showPortals = true, showVoice = true, showSettings = true,
@@ -523,6 +526,9 @@ local SETTING_BLACKLIST = {
         bm2           = true,   -- buff-manager v2 layer territory
         dmDebuff      = true,   -- debuff-manager layer territory
         partyFrameStyle = true, -- reload-gated Party page Frame Style (latched at load, like the Style flags)
+    },
+    EllesmereUINameplates = {
+        nameplateSize = true, -- reload-gated Blizzard Nameplate Size (the game reads its CVar at load)
     },
 }
 

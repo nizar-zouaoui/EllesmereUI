@@ -93,6 +93,17 @@ _G._EUI_BuildFlightTimerPage = function(pageName, parent, yOffset)
           getValue = function() return FT.Get("fade") end,
           setValue = function(v) FT.Cfg().fade = v end }
     );  y = y - h
+    _, h = W:DualRow(parent, y,
+        { type = "toggle", text = "Flight Time on the Map",
+          tooltip = "On the flight map, a destination's tooltip shows how long the flight takes.",
+          disabled = off, disabledTooltip = "Flight Timer",
+          getValue = function() return FT.Get("mapTooltip") end,
+          setValue = function(v)
+              FT.Cfg().mapTooltip = v
+              FT.Apply()
+          end },
+        EllesmereUI.BlankRowCfg()
+    );  y = y - h
 
     _, h = W:Spacer(parent, y, 20);  y = y - h
 
@@ -162,7 +173,7 @@ _G._EUI_BuildFlightTimerPage = function(pageName, parent, yOffset)
           setPx = function(v) FT.Cfg().borderSizePx = v end,
           apply = function() FT.ApplyStyle(); EllesmereUI:RefreshPage() end }
     );  y = y - h
-    if not EllesmereUI._prebuilding then
+    do
         local offsetX, offsetY = BorderOffsets("borderTexture")
         EllesmereUI.BuildInlineCog(borderRow._leftRegion, { title = "Border Options",
             disabled = function() return off() or SolidBorder() end,
@@ -179,6 +190,8 @@ _G._EUI_BuildFlightTimerPage = function(pageName, parent, yOffset)
                   get = function() return FT.Get("borderBehind") end,
                   set = function(v) Set("borderBehind", v) end },
             } })
+    end
+    if not EllesmereUI._prebuilding then
         EllesmereUI.BuildInlineSwatches(borderRow._rightRegion, {
             { tooltip = "Border Color",
               disabled = function() return off() or FT.Get("borderSize") == 0 end,

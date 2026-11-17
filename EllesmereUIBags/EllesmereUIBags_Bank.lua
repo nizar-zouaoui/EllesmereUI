@@ -351,6 +351,7 @@ end)
 
 -- Close button (created after search/sort so it renders on top)
 local close = CreateFrame("Button", nil, header)
+EUI_Bank._closeBtn = close  -- Junk Marker mode lets a click on it through
 close:SetSize(12, 12)
 close:SetPoint("RIGHT", header, "RIGHT", -9, 0)
 close.icon = close:CreateTexture(nil, "OVERLAY")
@@ -630,7 +631,6 @@ do
     withdrawMoneyBtn:SetPoint("RIGHT", depositMoneyBtn, "LEFT", -8, 0)
 
     local function ShowMoneyPopup(title, onAccept)
-        if not EUI.ShowInputPopup then return end
         EUI:ShowInputPopup({
             title = EllesmereUI.L(title),
             message = EllesmereUI.L("Enter an amount:"),
@@ -645,14 +645,12 @@ do
     end
 
     withdrawMoneyBtn:SetScript("OnClick", function()
-        if not C_Bank or not C_Bank.CanWithdrawMoney then return end
         if not C_Bank.CanWithdrawMoney(Enum.BankType.Account) then return end
         ShowMoneyPopup("Withdraw from Warbank", function(copper)
             C_Bank.WithdrawMoney(Enum.BankType.Account, copper)
         end)
     end)
     depositMoneyBtn:SetScript("OnClick", function()
-        if not C_Bank or not C_Bank.CanDepositMoney then return end
         if not C_Bank.CanDepositMoney(Enum.BankType.Account) then return end
         ShowMoneyPopup("Deposit to Warbank", function(copper)
             C_Bank.DepositMoney(Enum.BankType.Account, copper)
@@ -680,7 +678,6 @@ do
         self._label:SetTextColor(r, g, b, 1)
     end)
     depositItemsBtn:SetScript("OnClick", function(self)
-        if not C_Bank or not C_Bank.AutoDepositItemsIntoBank then return end
         local bankType = self._bankType
         if bankType then
             C_Bank.AutoDepositItemsIntoBank(bankType)
@@ -693,7 +690,9 @@ do
         warbandGold:SetText(FormatGold(GL.WarbandMoney() or 0))
     end
 
-    function EUI_Bank:UpdateDepositButton(isWarband)
+    -- The footer's right side for the view on screen. noTab: the bank has no tab
+    -- yet, so there is nothing to deposit items into.
+    function EUI_Bank:UpdateDepositButton(isWarband, noTab)
         if isWarband then
             depositItemsLabel:SetText(EllesmereUI.L("Deposit Warbound Items"))
             depositItemsBtn._bankType = Enum.BankType.Account
@@ -704,9 +703,24 @@ do
         local r, g, b = GetAccentRGB()
         depositItemsLabel:SetTextColor(r, g, b, 1)
         depositItemsBtn:SetWidth(depositItemsLabel:GetStringWidth() + 16)
-        depositItemsBtn:Show()
-        withdrawMoneyBtn:Show()
-        depositMoneyBtn:Show()
+        depositItemsBtn:SetShown(not noTab and C_Bank.DoesBankTypeSupportAutoDeposit(depositItemsBtn._bankType))
+        -- Warband gold and its buttons only where the client has a usable Warband bank
+        -- (WoW Forever has none); without them the item button takes the right edge.
+        -- Shown, hidden and re-anchored only when that answer changes.
+        local acct = Enum.BankType.Account
+        local moneyOk = (C_Bank.CanViewBank(acct) and C_Bank.DoesBankTypeSupportMoneyTransfer(acct)) and true or false
+        if moneyOk == footer._moneyOk then return end
+        footer._moneyOk = moneyOk
+        withdrawMoneyBtn:SetShown(moneyOk)
+        depositMoneyBtn:SetShown(moneyOk)
+        warbandGold:SetShown(moneyOk)
+        warbandHitbox:SetShown(moneyOk)
+        depositItemsBtn:ClearAllPoints()
+        if moneyOk then
+            depositItemsBtn:SetPoint("RIGHT", withdrawMoneyBtn, "LEFT", -8, 0)
+        else
+            depositItemsBtn:SetPoint("RIGHT", warbandGold, "RIGHT", 0, 0)
+        end
     end
 end
 
@@ -725,10 +739,14 @@ EUI_Bank:SetScript("OnMouseUp", function(self, button)
     if self._moving then
         self:StopMovingOrSizing()
         self._moving = nil
-        -- Save position
-        local point, _, relPoint, x, y = self:GetPoint(1)
-        if point then
-            BP().bankPosition = { point = point, relativePoint = relPoint, x = x, y = y }
+        if ns.WindowCornerOn() then
+            ns.SaveWindowCorner(self, "bankPosition")
+        else
+            -- The point the game left the window on
+            local point, _, relPoint, x, y = self:GetPoint(1)
+            if point then
+                BP().bankPosition = { point = point, relativePoint = relPoint, x = x, y = y }
+            end
         end
     end
 end)
@@ -860,7 +878,7 @@ local function EnsureBankTabConfigFrame()
         btn:SetPoint("TOPLEFT", assignToTabFrame, "TOPLEFT", xOffset, yOffset)
         btn:SetFrameLevel(assignToTabFrame:GetFrameLevel() + 2)
 
-        local box, _, _, cbApply = EUI.BuildCheckboxControl(btn, assignToTabFrame:GetFrameLevel() + 2)
+        local box, _, _, cbApply = EUI.BuildCheckboxControl(btn, assignToTabFrame:GetFrameLevel() + 2, EUI.PP)
         PP.Point(box, "LEFT", btn, "LEFT", 0, 0)
 
         local label = EUI.MakeFont(btn, 14, nil, EUI.TEXT_WHITE.r, EUI.TEXT_WHITE.g, EUI.TEXT_WHITE.b)
@@ -1100,28 +1118,29 @@ end
 -- Sidebar header: "Tabs" label + collapse arrow
 local sidebarHdr, collapseBtn, UpdateBankCollapseArrow = ns.CreateSidebarHeader(sidebar, EllesmereUI.L("Tabs"), "bankSidebarCollapsed")
 
+-- With Anchor to Nearest Corner a window parked on the right keeps its right
+-- edge by its anchor. Without it, a window right of the screen's middle is
+-- shifted by what its right edge moved (nothing when its own anchor held it).
 collapseBtn:SetScript("OnClick", function()
-    -- Determine which edge to preserve based on screen position
-    local center = EUI_Bank:GetCenter()
-    local screenW = UIParent:GetWidth()
-    local onRightSide = center and screenW and (center > screenW / 2)
-    local oldWidth = onRightSide and EUI_Bank:GetWidth() or nil
+    local oldRight
+    if not ns.WindowCornerOn() then
+        local center = EUI_Bank:GetCenter()
+        local screenW = UIParent:GetWidth()
+        if center and screenW and center > screenW / 2 then oldRight = EUI_Bank:GetRight() end
+    end
 
     BP().bankSidebarCollapsed = not BP().bankSidebarCollapsed
     UpdateBankCollapseArrow()
     sidebar:SetWidth(GetBankSidebarContentWidth())
     EUI_Bank:RefreshBank()
 
-    -- Shift frame by width difference to preserve right edge
-    if onRightSide and oldWidth then
-        local newWidth = EUI_Bank:GetWidth()
-        local shift = oldWidth - newWidth
-        if math.abs(shift) > 0.5 then
-            local point, rel, relPoint, x, y = EUI_Bank:GetPoint()
-            EUI_Bank:ClearAllPoints()
-            EUI_Bank:SetPoint(point, rel, relPoint, x + shift, y)
-            BP().bankPosition = { point = point, relativePoint = relPoint, x = x + shift, y = y }
-        end
+    local newRight = oldRight and EUI_Bank:GetRight()
+    if newRight and math.abs(oldRight - newRight) > 0.5 then
+        local shift = oldRight - newRight
+        local point, rel, relPoint, x, y = EUI_Bank:GetPoint()
+        EUI_Bank:ClearAllPoints()
+        EUI_Bank:SetPoint(point, rel, relPoint, x + shift, y)
+        BP().bankPosition = { point = point, relativePoint = relPoint, x = x + shift, y = y }
     end
 end)
 
@@ -1527,6 +1546,7 @@ end
 --  List view (bankListView): rows from EllesmereUIBags_List.lua
 -------------------------------------------------------------------------------
 local _bankRows = {}
+EUI_Bank._bankRows = _bankRows  -- mark mode hit-tests the bank's rows too
 
 -- Latched on the first read after the profile loads, like EUI_Bags.IsListMode:
 -- switching needs a reload, so only one bank display builds per session.
@@ -2097,9 +2117,7 @@ local _bankGripCfg = {
         UpdateThumb()
     end,
     finish = function() EUI_Bank:RefreshBank() end,
-    savePos = function(left, top)
-        BP().bankPosition = { point = "TOPLEFT", relativePoint = "BOTTOMLEFT", x = left, y = top }
-    end,
+    posKey = "bankPosition",
     reset = function()
         local p = BP()
         p.bankColumns, p.bankHeight, p.bankListWidth = nil, nil, nil
@@ -2162,6 +2180,7 @@ function EUI_Bank:RefreshBank()
             -- Still build sidebar so purchase buttons are visible
             BuildBankSidebar()
             if UpdateBaseTabPrompt then UpdateBaseTabPrompt(true) end
+            EUI_Bank:UpdateDepositButton(false, true)
             return
         end
     end
@@ -2480,6 +2499,21 @@ function EUI_Bank:RefreshBank()
         _catIndex = nil
     end
     if _catSel and not _catIndex then _catSel = nil end
+    -- A category that is gone (Delete) or turned off, or a group with no member
+    -- that is on, shows nowhere
+    if _catSel then
+        local CM = _G.EUI_CategoryManager
+        local dc = BP().bagDisabledCategories
+        if _catSel.group then
+            if not CM:FirstOnMember(_catSel.group, dc) then _catSel = nil end
+        else
+            local found
+            for _, c in ipairs(CM:GetCategories()) do
+                if c._defaultName == _catSel.key then found = c; break end
+            end
+            if not found or CM:IsCategoryOff(found, dc) then _catSel = nil end
+        end
+    end
 
     if _catSel then
         LayoutSelectionSlots(GetSelectionSlots() or {})
@@ -2607,6 +2641,7 @@ function EUI_Bank:RefreshBank()
             btn:SetItemButtonTexture(nil)
             btn:SetItemButtonCount(0)
             SetItemButtonDesaturated(btn, false)
+            if btn._junkCoin then btn._junkCoin:Hide() end
             if btn.icon then btn.icon:Hide() end
             btn._emptyBg:Show(); ns.PaintSlotBackground(btn._emptyBg, 0.35)
             btn:EnableMouse(true)
@@ -2624,8 +2659,11 @@ function EUI_Bank:RefreshBank()
             ns.SetSlotIcon(btn, info.iconFileID)
             btn:SetItemButtonCount(info.stackCount)
             local quality = info.quality or 1
-            SetItemButtonDesaturated(btn, info.isLocked or (desatJunk and (quality == 0
-                or (junkOn and _G.EUI_CategoryManager:IsJunk(info.itemID, quality)))) or false)
+            -- The mark is read only where it is drawn: Desaturate, or mark mode's coin
+            local marking = EUI_Bags._junkMode
+            local isJunk = (desatJunk or marking) and junkOn and _G.EUI_CategoryManager:IsJunk(info.itemID, quality) or false
+            SetItemButtonDesaturated(btn, info.isLocked or (desatJunk and (quality == 0 or isJunk)) or false)
+            if marking or btn._junkCoin then ns.PaintJunkCoin(btn, marking and isJunk or false) end
             local itemLink = C_Container.GetContainerItemLink(bagID, slot)
             if itemLink then btn:SetItemButtonQuality(quality, itemLink, false, false) end
             if btn.ProfessionQualityOverlay and btn.ProfessionQualityOverlay:IsShown() and btn._textOverlay then
@@ -3389,6 +3427,9 @@ function BuildBankSidebar()
 
         local anyCat = false
         local renderedGroups = {}
+        -- A turned-off category holds nothing here (its items are the catch-all's)
+        -- and lends its group no icon
+        local dc = BP().bagDisabledCategories
         for _, cat in ipairs(cats) do
             -- Pinned / Recent / Reagent Bag / Special Bags are bag-side concepts with
             -- no bank equivalent; ClassifyItem never routes bank items to them anyway.
@@ -3400,7 +3441,7 @@ function BuildBankSidebar()
                         local total, firstCat = 0, nil
                         for _, mi in ipairs(members) do
                             local mc = cats[mi]
-                            if mc then
+                            if mc and not CM:IsCategoryOff(mc, dc) then
                                 total = total + CountFor(mc)
                                 if not firstCat then firstCat = mc end
                             end
@@ -3534,6 +3575,8 @@ eventFrame:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 eventFrame:RegisterEvent("BANK_TABS_CHANGED")
 eventFrame:RegisterEvent("BANK_TAB_SETTINGS_UPDATED")
 eventFrame:RegisterEvent("PLAYER_ACCOUNT_BANK_TAB_SLOTS_CHANGED")
+-- A skill rank change can flip an item's unusable tint, which the bank draws too.
+eventFrame:RegisterEvent("SKILL_LINES_CHANGED")
 if EUI.IS_FOREVER then eventFrame:RegisterEvent("BAG_CONTAINER_UPDATE") end
 eventFrame:SetScript("OnEvent", function(_, event)
     if event == "BANKFRAME_OPENED" then
@@ -3567,6 +3610,7 @@ eventFrame:SetScript("OnEvent", function(_, event)
         EUI_Bank:Show()
         EUI_Bank:Raise()
         EUI_Bank:RepinIconLevels()
+        ns.SettleWindowPos(EUI_Bank, "bankPosition")
         -- Controller cursor: scroll step buttons and a visible scrollbar,
         -- built only once a controller is in use.
         if EUI_Bank._padBuilt or EUI.PadInUse() then
@@ -3663,7 +3707,7 @@ eventFrame:SetScript("OnEvent", function(_, event)
         end
 
     elseif event == "BAG_UPDATE" or event == "PLAYERBANKSLOTS_CHANGED"
-        or event == "PLAYER_ACCOUNT_BANK_TAB_SLOTS_CHANGED" then
+        or event == "PLAYER_ACCOUNT_BANK_TAB_SLOTS_CHANGED" or event == "SKILL_LINES_CHANGED" then
         if EUI_Bank:IsVisible() then
             ScheduleBankRefresh()
         end

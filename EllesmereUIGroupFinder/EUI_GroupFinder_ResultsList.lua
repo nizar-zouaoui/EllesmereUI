@@ -38,10 +38,15 @@ function ns.SetOwnListSize(k, v)
 end
 -- display settings
 local DISPLAY_DEFAULTS = { iconShape = "circle", borderTexture = "solid", borderSize = 1, missingIcons = "blizzard",
+    raidRoleIcons = "ellesmere",
     appsFirst = true, signupClicks = "double", visibility = "hidden",
-    lineDelisted = false, lineAccepted = false, lineCancelled = false, lineDeclined = false }
+    lineDelisted = false, lineAccepted = false, lineCancelled = false, lineDeclined = false, lineMismatch = false,
+    delistedOpacity = 50 }
+-- signed up was part of accepted: until it's set, it follows accepted's switch and color
+local FOLLOWS = { lineSigned = "lineAccepted", color_lineSigned = "color_lineAccepted" }
 function ns.OwnListGet(k)
     local v = DB()[k]
+    if v == nil and FOLLOWS[k] then return ns.OwnListGet(FOLLOWS[k]) end
     if v == nil then return DISPLAY_DEFAULTS[k] end
     return v
 end
@@ -212,6 +217,60 @@ local dimmed = {}
 -- kept from the last collect: applications, each listed group's filter pass
 -- (a result update is checked against it) and the sort's values
 local seen, isApp, passOf, sortVal = {}, {}, {}, {}
+-- pending applications your filters would now leave out, the ones cancelled for it,
+-- and each one's pass when first seen applied (only a pass that turns into a fail counts)
+local mismatch, autoCancelled, cancelSent, firstPass = {}, {}, {}, {}
+-- only worked out while the colour or the auto cancel is on
+local function MismatchOn()
+    if ns.OwnListGet("lineMismatch") ~= false then return true end
+    local gc = GFNS.Cfg and GFNS.Cfg()
+    return gc and gc.autoCancelMismatch == true or false
+end
+-- the filters are per tab: only the shown tab's applications are judged
+local function OnShownTab(id)
+    local info = C_LFGList.GetSearchResultInfo(id)
+    if not Readable(info) then return false end
+    local acts = info.activityIDs
+    local act = type(acts) == "table" and not Secret(acts) and acts[1]
+    local ai = act and not Secret(act) and C_LFGList.GetActivityInfoTable(act)
+    return Readable(ai) and SP and ai.categoryID == SP.categoryID or false
+end
+local function MismatchOf(id, note)
+    local _, status = C_LFGList.GetApplicationInfo(id)
+    if Secret(status) or status ~= "applied" then
+        firstPass[id], autoCancelled[id] = nil, nil
+        return false
+    end
+    if not GFNS.ExtraPassesAsNew or not OnShownTab(id) then return false end
+    local pass = GFNS.ExtraPassesAsNew(id) and true or false
+    if firstPass[id] == nil then
+        if note then firstPass[id] = pass end
+        return false
+    end
+    return firstPass[id] and not pass
+end
+-- cancelling needs a click, so it waits for your next one on the list.
+-- except: the row whose own cancel that click is. true when it sent one.
+local function SendMismatchCancels(except)
+    local gc = GFNS.Cfg and GFNS.Cfg()
+    if not (gc and gc.autoCancelMismatch) then return false end
+    -- a party member who is not the leader cannot cancel the party's applications
+    if LFGListUtil_IsAppEmpowered and not LFGListUtil_IsAppEmpowered() then return false end
+    local sent = false
+    for id in pairs(mismatch) do
+        if id ~= except and not autoCancelled[id] then
+            -- the set is from the last collect: still pending now?
+            local status, pending = AppStatus(id)
+            if status == "applied" and not pending then
+                autoCancelled[id] = true
+                cancelSent[id] = true
+                C_LFGList.CancelApplication(id)
+                sent = true
+            end
+        end
+    end
+    return sent
+end
 local noteOf, tops = {}, {}  -- shown groups with a note, each shown row's top
 
 -- the group's note when notes are on and it has one
@@ -236,6 +295,7 @@ end
 local function Collect()
     wipe(shown)
     wipe(dimmed)
+    wipe(mismatch)
     wipe(seen)
     wipe(isApp)
     wipe(passOf)
@@ -245,9 +305,16 @@ local function Collect()
     local appsFirst = ns.OwnListGet("appsFirst") ~= false
     for _, id in ipairs(res) do if not Secret(id) then Pos(id) end end
     local apps = C_LFGList.GetApplications() or {}
+    local judge = MismatchOn()
     for _, id in ipairs(apps) do
-        if not Secret(id) then isApp[id] = true end
+        if not Secret(id) then
+            isApp[id] = true
+            if judge and MismatchOf(id, true) then mismatch[id] = true end
+        end
     end
+    -- applications that ended unseen (window closed): a new sign up starts fresh
+    for id in pairs(firstPass) do if not isApp[id] then firstPass[id] = nil end end
+    for id in pairs(autoCancelled) do if not isApp[id] then autoCancelled[id] = nil end end
     if appsFirst then
         for _, id in ipairs(apps) do
             if not Secret(id) and not seen[id] then
@@ -367,6 +434,12 @@ local RR_COLORS = { TANK = { 0.16, 0.38, 0.78 }, HEALER = { 0.16, 0.62, 0.24 }, 
 ns.RaidRoleColors = RR_COLORS
 local NEED_ATLAS = { TANK = "groupfinder-icon-role-micro-tank", HEALER = "groupfinder-icon-role-micro-heal",
     DAMAGER = "groupfinder-icon-role-micro-dps" }
+-- blizzard's raid role circles, gold ring included
+local BLIZZ_RR_ATLAS = { TANK = "groupfinder-icon-role-large-tank", HEALER = "groupfinder-icon-role-large-heal",
+    DAMAGER = "groupfinder-icon-role-large-dps" }
+local BLIZZ_RR_SCALE = 1.22  -- art size over its visible ring
+-- a delisted group's text colour: the delisted row highlight colour, set on each paint (not DB: that's the settings)
+local DelR, DelG, DelB = 0x5B / 255, 0x5B / 255, 0x5B / 255
 local REMAINING = { TANK = "TANK_REMAINING", HEALER = "HEALER_REMAINING", DAMAGER = "DAMAGER_REMAINING" }
 local PERSON_TEX = "Interface\\AddOns\\EllesmereUI\\media\\icons\\eui-person.png"
 local PLAYERS_COLOR = { 0.4, 0.4, 0.42 }
@@ -425,12 +498,15 @@ local STATUS = {
 }
 -- underline setting + color per status
 -- each status: its switch, its own color and the key of the user's color
-local LINE_DELISTED  = { "lineDelisted", 0.6, 0.6, 0.6, "color_lineDelisted" }
+local LINE_DELISTED  = { "lineDelisted", 0x5B / 255, 0x5B / 255, 0x5B / 255, "color_lineDelisted" }
+local LINE_SIGNED    = { "lineSigned", 0.1, 0.9, 0.1, "color_lineSigned" }
 local LINE_ACCEPTED  = { "lineAccepted", 0.1, 0.9, 0.1, "color_lineAccepted" }
 local LINE_CANCELLED = { "lineCancelled", 1, 0.55, 0.1, "color_lineCancelled" }
 local LINE_DECLINED  = { "lineDeclined", 1, 0.2, 0.2, "color_lineDeclined" }
+local LINE_MISMATCH  = { "lineMismatch", 1, 0.82, 0, "color_lineMismatch" }
 -- by switch, for the settings page's color pickers
-ns.STATUS_LINES = { lineDelisted = LINE_DELISTED, lineAccepted = LINE_ACCEPTED,
+ns.STATUS_LINES = { lineDelisted = LINE_DELISTED, lineSigned = LINE_SIGNED, lineAccepted = LINE_ACCEPTED,
+    lineMismatch = LINE_MISMATCH,
     lineCancelled = LINE_CANCELLED, lineDeclined = LINE_DECLINED }
 -- a status's color: the user's, else its own
 local function StatusColor(line)
@@ -440,7 +516,7 @@ local function StatusColor(line)
 end
 local LINE_OF = {
     [STATUS.declined_delisted] = LINE_DELISTED,
-    [STATUS.applied] = LINE_ACCEPTED, [STATUS.invited] = LINE_ACCEPTED, [STATUS.inviteaccepted] = LINE_ACCEPTED,
+    [STATUS.applied] = LINE_SIGNED, [STATUS.invited] = LINE_ACCEPTED, [STATUS.inviteaccepted] = LINE_ACCEPTED,
     [STATUS.cancelled] = LINE_CANCELLED,
     [STATUS.declined] = LINE_DECLINED, [STATUS.declined_full] = LINE_DECLINED, [STATUS.timedout] = LINE_DECLINED,
     [STATUS.invitedeclined] = LINE_DECLINED, [STATUS.failed] = LINE_DECLINED,
@@ -560,7 +636,10 @@ local function MakeRow(i, parent)
     r.cancel:SetScript("OnClick", function(self)
         if self:GetParent().preview then return end
         local id = self:GetParent().resultID
-        if id and not Secret(id) then C_LFGList.CancelApplication(id) end
+        if id and Secret(id) then id = nil end
+        -- this row's cancel is the click itself; the other mismatched ones go with it
+        SendMismatchCancels(id)
+        if id then C_LFGList.CancelApplication(id) end
     end)
     r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     r.status:SetJustifyH("RIGHT")
@@ -641,14 +720,16 @@ local function MakeRow(i, parent)
         if self.preview then return end
         local id = self.resultID
         if not id or not active then return end
+        local cancelled = SendMismatchCancels()
         if button == "RightButton" then return ns.OwnListMenu(self, id) end
         local now = GetTime()
         if lastClickID == id and (now - lastClickTime) < 0.4 then clickCount = clickCount + 1 else clickCount = 1 end
         lastClickID, lastClickTime = id, now
         local need = CLICKS_NEEDED[ns.OwnListGet("signupClicks")] or 2
         local signup = EllesmereUIDB and EllesmereUIDB.quickSignup and clickCount >= need
-        -- at the app limit, cancel the oldest
-        if ns.GFCancelOldest then ns.GFCancelOldest(id) end
+        -- at the app limit, cancel the oldest (not in a click that just cancelled
+        -- a mismatched one: that slot is freeing up)
+        if not cancelled and ns.GFCancelOldest then ns.GFCancelOldest(id) end
         -- same check blizzard's row click does
         if not Selectable(id) then return end
         if selected ~= id then
@@ -831,9 +912,19 @@ local LIVE = {
 }
 
 -- line three: playstyle | region | time since you signed up
+-- a font string in the delisted grey, or back to the colour it was made with
+local function Grey(fs, gone)
+    if not fs.baseColor then fs.baseColor = { fs:GetTextColor() } end
+    if gone then fs:SetTextColor(DelR, DelG, DelB)
+    else local c = fs.baseColor; fs:SetTextColor(c[1], c[2], c[3], c[4]) end
+end
+
 local function LineThree(r, id, info, src)
     local parts = r.line3
     for i = 1, #parts do parts[i]:Hide() end
+    local gone = r.gone
+    Grey(r.sep1, gone); Grey(r.style, gone); Grey(r.sep2, gone); Grey(r.sep3, gone); Grey(r.timer, gone)
+    r.flag:SetDesaturated(gone)
     r.signedAt = nil
     r.l3prev = nil
     if (r.lines or 0) < 3 then return end
@@ -852,7 +943,7 @@ local function LineThree(r, id, info, src)
     if tag then
         if r.l3prev then Put(r, r.sep2, 4) end
         r.tag:SetText(tag)
-        r.tag:SetTextColor(tr, tg, tb, 1)
+        if gone then r.tag:SetTextColor(DelR, DelG, DelB) else r.tag:SetTextColor(tr, tg, tb, 1) end
         Put(r, r.tag, 4)
         if flag then
             local fh = math.max(8, ns.OwnListSize("lineSize"))
@@ -875,6 +966,11 @@ local function Fill(r, id, src)
     r.resultID = id
     local info = src.info(id)
     if not Readable(info) then r:Hide() return end
+    -- delisted: greyed like blizzard's, not faded
+    local gone = info.isDelisted
+    gone = not Secret(gone) and gone and true or false
+    r.gone = gone
+    if gone then DelR, DelG, DelB = StatusColor(LINE_DELISTED) end
     -- protected text, straight to the font string
     r.name:SetText(info.name)
     local acts = info.activityIDs
@@ -885,8 +981,10 @@ local function Fill(r, id, src)
     local nr, ng, nb
     nr, ng, nb = src.nameColor(id, info, ai)  -- "and" would drop g and b
     if not nr then nr, ng, nb = FriendColor(info) end
-    if nr then r.name:SetTextColor(nr, ng, nb) else r.name:SetTextColor(1, 0.82, 0) end
+    if gone then r.name:SetTextColor(DelR, DelG, DelB)
+    elseif nr then r.name:SetTextColor(nr, ng, nb) else r.name:SetTextColor(1, 0.82, 0) end
     r.act:SetText(ai and ai.fullName or "")
+    Grey(r.act, gone)
     -- the note, only where the list left room for it (protected text, straight to the font string)
     local note = r.noteRoom and NoteText(info)
     if note then
@@ -936,25 +1034,29 @@ local function Fill(r, id, src)
         local cr, cg, cb = 1, 1, 1
         if ns.GFRatingColor then cr, cg, cb = ns.GFRatingColor(score) end
         r.score:SetText(score)
-        r.score:SetTextColor(cr, cg, cb)
+        if r.gone then r.score:SetTextColor(DelR, DelG, DelB) else r.score:SetTextColor(cr, cg, cb) end
     else
         r.score:SetText("")
     end
     local st = appStatus and STATUS[appStatus]
     local delisted = info.isDelisted
     if not Secret(delisted) and delisted then st = STATUS.declined_delisted end  -- secret check first
+    -- signed up, but your filters would now leave the group out
+    local stale = st == STATUS.applied and mismatch[id] and ns.OwnListGet("lineMismatch") ~= false
     if st then
         r.status:SetText(st[1])
-        -- same color as the status effect
-        local sl = LINE_OF[st]
+        -- same color as the row highlight
+        local sl = stale and LINE_MISMATCH or LINE_OF[st]
         if sl then r.status:SetTextColor(StatusColor(sl)) else r.status:SetTextColor(st[2], st[3], st[4], 1) end
     else
         r.status:SetText("")
     end
-    -- status effect: an underline, or the whole row tinted
-    local line = st and LINE_OF[st]
+    -- row highlight: an underline, or the whole row tinted
+    local line = stale and LINE_MISMATCH or st and LINE_OF[st]
     local on = line and ns.OwnListGet(line[1]) ~= false or false
-    local rowFx = on and ns.OwnListGet("statusStyle") == "row" or false
+    local style = ns.OwnListGet("statusStyle")
+    if style == "none" then on = false end  -- the status text keeps its colour
+    local rowFx = on and style == "row" or false
     if on then
         local lr, lg, lb = StatusColor(line)
         -- solid, so it reads the same over any window background (the preview's is darker)
@@ -1043,12 +1145,13 @@ local function Fill(r, id, src)
         r.crowns[k]:Hide()
         r.rings[k]:Hide()
         role:Hide()
-        role:SetDesaturated(false)
+        role:SetDesaturated(gone)
         role:SetAlpha(1)
         bf:Hide()
         if t._masked then t:RemoveMaskTexture(r.masks[k]); t._masked = nil end
         t:SetTexCoord(0, 1, 0, 1)
-        t:SetDesaturated(false)
+        t:SetDesaturated(gone)
+        r.crowns[k]:SetDesaturated(gone)
         if mode ~= "icons" then
             t:Hide()
         elseif m then
@@ -1120,7 +1223,7 @@ local function Fill(r, id, src)
     -- raid role counts, rating to their left
     local counts = mode == "counts" and src.counts(id)
     if not Readable(counts) then counts = nil end
-    local ellIcons = ns.OwnListGet("missingIcons") == "ellesmere"
+    local blizzRR = ns.OwnListGet("raidRoleIcons") == "blizzard"
     local round = ns.OwnListGet("iconShape") ~= "square"
     -- round rings sit outside the circle, so the first one steps in like the member icons
     local x = -(r.pad or 6) - (round and bpx or 0)
@@ -1134,20 +1237,45 @@ local function Fill(r, id, src)
         local num = counts and counts[role]
         if counts and type(num) == "number" and not Secret(num) then
             -- icon centered, count above
-            local c = RR_COLORS[role]
-            p.bg:SetColorTexture(c[1], c[2], c[3], 1)
-            if round and not p.masked then p.bg:AddMaskTexture(p.mask); p.masked = true
-            elseif not round and p.masked then p.bg:RemoveMaskTexture(p.mask); p.masked = nil end
-            p.bg:SetSize(isz, isz)
+            local edge = 0
+            if blizzRR then
+                -- blizzard's circle as one texture, no mask or border of ours
+                if p.masked then p.bg:RemoveMaskTexture(p.mask); p.masked = nil end
+                p.bg:SetAtlas(BLIZZ_RR_ATLAS[role])
+                p.icon:SetTexture(nil)
+                p.ring:Hide(); p.edge:Hide()
+            else
+                local c = RR_COLORS[role]
+                p.bg:SetColorTexture(c[1], c[2], c[3], 1)
+                if round and not p.masked then p.bg:AddMaskTexture(p.mask); p.masked = true
+                elseif not round and p.masked then p.bg:RemoveMaskTexture(p.mask); p.masked = nil end
+                CircleEdge(p, round, bpx, br, bg, bb, btex, bkey)
+                p.icon:SetAtlas(NEED_ATLAS[role])
+                local gsz = math.floor(isz * 0.7 + 0.5)
+                p.icon:SetSize(gsz, gsz)
+                edge = round and bpx * 2 or 0
+            end
+            p.bg:SetDesaturated(gone)
+            p.icon:SetDesaturated(gone)
             p.bg:ClearAllPoints()
-            p.bg:SetPoint("RIGHT", r.mid, "RIGHT", x, 0)
+            if blizzRR then
+                -- the art has a clear margin round its ring: grow it till the ring matches ours, same centre
+                edge = round and bpx * 2 or 0
+                local sz = math.floor((isz + edge) * BLIZZ_RR_SCALE + 0.5) - 2
+                p.bg:SetSize(sz, sz)
+                p.bg:SetPoint("CENTER", r.mid, "RIGHT", x - isz / 2, 0)
+            else
+                p.bg:SetSize(isz, isz)
+                p.bg:SetPoint("RIGHT", r.mid, "RIGHT", x, 0)
+            end
             p.bg:Show()
-            CircleEdge(p, round, bpx, br, bg, bb, btex, bkey)
-            local tex = ellIcons and ns.RoleIconTex and ns.RoleIconTex(role)
-            if tex then p.icon:SetTexture(tex) else p.icon:SetAtlas(NEED_ATLAS[role]) end
-            local gsz = math.floor(isz * 0.7 + 0.5)
-            p.icon:SetSize(gsz, gsz)
-            x = x - PlaceCount(p, num, isz, fsz, inside) - 6 - (round and bpx * 2 or 0)
+            x = x - PlaceCount(p, num, isz, fsz, inside) - 6 - edge
+            if blizzRR and not inside then
+                -- the number on the ring's top, not the art's
+                p.count:ClearAllPoints()
+                p.count:SetPoint("BOTTOMLEFT", p.bg, "CENTER", -isz * 1.5, isz / 2 + 1)
+                p.count:SetPoint("BOTTOMRIGHT", p.bg, "CENTER", isz * 1.5, isz / 2 + 1)
+            end
         else
             p.bg:Hide(); p.icon:Hide(); p.count:Hide(); p.ring:Hide(); p.edge:Hide()
         end
@@ -1157,6 +1285,8 @@ local function Fill(r, id, src)
     local pc = r.rr[4]
     if type(players) == "number" and not Secret(players) then
         pc.bg:SetColorTexture(PLAYERS_COLOR[1], PLAYERS_COLOR[2], PLAYERS_COLOR[3], 1)
+        pc.bg:SetDesaturated(gone)
+        pc.icon:SetDesaturated(gone)
         if round and not pc.masked then pc.bg:AddMaskTexture(pc.mask); pc.masked = true
         elseif not round and pc.masked then pc.bg:RemoveMaskTexture(pc.mask); pc.masked = nil end
         pc.bg:SetSize(isz, isz)
@@ -1189,6 +1319,7 @@ local function Fill(r, id, src)
         r.sel:SetColorTexture(ar, ag, ab, selected == id and 0.18 or 0)
     end
     if dimmed[id] then r:SetAlpha(0.35)
+    elseif gone then r:SetAlpha((tonumber(ns.OwnListGet("delistedOpacity")) or 50) / 100)  -- the delisted opacity setting
     else r:SetAlpha((st and st ~= STATUS.applied and st ~= STATUS.invited) and 0.5 or 1) end
     r:Show()
 end
@@ -1197,7 +1328,7 @@ end
 --  settings preview: sample groups drawn by the list's own rows
 -------------------------------------------------------------------------------
 local PV_W, PV_PAD, PV_MARGIN = 330, 8, 10  -- about the list's row width
-local PV_SCALE = 1.3  -- drawn larger than the list, to read the details
+local PV_SCALE = 1  -- times the list's own size: 1 draws the rows as the dungeons & raids window does
 local PV_STEP = 0.3  -- a wheel tick, in rows
 local PV_DD_W, PV_DD_GAP = 170, 12  -- the preview picker, right of it
 local PV_TITLES = { groups = EllesmereUI.L("Group Finder Preview"), dungeon = EllesmereUI.L("Applicant Preview"),
@@ -1376,8 +1507,8 @@ local function PvFit()
     end
     local fw, fh = rw + PV_PAD * 2, PV_PAD + PV_TITLE + PV_VIEW_H + PV_PAD
     f:SetSize(fw, fh)
-    -- the ui's own scale and then some, grown or shrunk with the settings
-    -- window's scale, and shrunk only if the panel is narrower
+    -- the list's own size (the ui's scale, not the panel's), grown or shrunk
+    -- with the settings window's scale, and shrunk only if the panel is narrower
     local hw = hdr:GetWidth() or 0
     -- room for the picker on both sides, so the preview stays centered
     local avail = (hw > 0 and hw or pv.hdrW or 600) - PV_MARGIN * 2 - (pv.dd and (PV_DD_W + PV_DD_GAP) * 2 or 0)
@@ -1487,7 +1618,7 @@ function ns.OwnListPreviewBuild(hdr, hdrW)
         view:SetPoint("TOPLEFT", f, "TOPLEFT", PV_PAD, -(PV_PAD + PV_TITLE))
         view:SetClipsChildren(true)
         pv.view = view
-        -- the wheel scrolls part of a row at a time: it's drawn larger than the list
+        -- the wheel scrolls part of a row at a time: the window holds only two
         view:EnableMouseWheel(true)
         view:SetScript("OnMouseWheel", function(_, delta)
             local was = pv.scroll or 0
@@ -1685,8 +1816,14 @@ local function Flush()
     end
     if not full then
         local notesOn = ns.OwnListGet("groupNotes")
+        local judge = MismatchOn()
         for id in pairs(dirty) do
             if ResultSecret(id) then
+                full = true
+                break
+            end
+            -- a pending application started or stopped matching your filters
+            if judge and isApp[id] and MismatchOf(id) ~= (mismatch[id] == true) then
                 full = true
                 break
             end
@@ -1777,7 +1914,10 @@ local function Build()
             hl:SetAllPoints()
             hl:SetColorTexture(1, 1, 1, 0.1)
         end
-        signBtn:SetScript("OnClick", function() SignUp(selected) end)
+        signBtn:SetScript("OnClick", function()
+            SendMismatchCancels()
+            SignUp(selected)
+        end)
         signBtn:SetScript("OnEnter", function(self)
             if not self.why then return end
             EUI.ShowWidgetTooltip(self, self.why)
@@ -1810,12 +1950,18 @@ local function Build()
     flusher = CreateFrame("Frame")
     flusher:Hide()
     flusher:SetScript("OnUpdate", Flush)
-    frame:SetScript("OnEvent", function(_, event, id)
+    frame:SetScript("OnEvent", function(_, event, id, newStatus)
         if event == "LFG_LIST_SEARCH_RESULT_UPDATED" then
             -- one group changed; a result can also go secret mid-list
             if type(id) == "number" and not Secret(id) then dirty[id] = true else fullDirty = true end
             flusher:Show()
         elseif event == "LFG_LIST_APPLICATION_STATUS_UPDATED" then
+            -- an auto cancel went through
+            if cancelSent[id] and newStatus == "cancelled" then
+                EUI.Print(EUI.COLOR_CODES.BRAND .. "EllesmereUI|r "
+                    .. EllesmereUI.L("Cancelled an application that no longer matches your filters."))
+            end
+            if type(id) == "number" then cancelSent[id] = nil end
             -- applications reorder the list (applied groups on top)
             fullDirty = true
             flusher:Show()

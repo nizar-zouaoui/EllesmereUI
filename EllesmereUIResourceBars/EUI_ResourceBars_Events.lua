@@ -169,10 +169,11 @@ end
 -- hover-reveal poll drives plain proxy tables instead of the real bars.
 --
 -- Taint: PingManager reads these three through securecallfunction and securecopies the
--- returned table, so our tainted execution stays contained. Safe HERE and not on the
--- unit frames (see the "NO ping mixin here" note in EUI_UnitFrames_Init.lua): this
--- receiver only ever names the player, whose GUID is never secret-content, so the
--- securecopy that hard-errors on a restricted unit has nothing to choke on.
+-- returned table, so our tainted execution stays contained. Safe HERE, and on the
+-- Unit Frames player button (Engine.SpawnUnitFrame), and on no other unit frame (see
+-- the "NO ping mixin here" note in EUI_UnitFrames_Init.lua): these receivers only ever
+-- name the player, whose GUID is never secret-content, so the securecopy that
+-- hard-errors on a restricted unit has nothing to choke on.
 local function ApplyPingReceivers()
     for _, bar in ipairs({ healthBar, primaryBar }) do
         if bar and not bar._erbPingOn then
@@ -244,6 +245,7 @@ function ERB:ApplyAll()
     if ns.MigrateLegacyAnchorTo then ns.MigrateLegacyAnchorTo() end
     if ns.AS_Apply then ns.AS_Apply() end
     if ns.ST_Apply then ns.ST_Apply() end
+    if ns.MT_Apply then ns.MT_Apply() end
     if ns.CT_Apply then ns.CT_Apply() end
 
     -- Vehicle proxy: hide resource bars during full vehicle UI ([vehicleui]

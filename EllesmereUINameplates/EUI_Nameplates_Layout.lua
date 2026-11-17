@@ -115,7 +115,11 @@ local function GetPandemicGlowSpeed()
     return (p and p.pandemicGlowSpeed) or defaults.pandemicGlowSpeed
 end
 ns.GetPandemicGlowSpeed = GetPandemicGlowSpeed
+-- WoW Forever has no pandemic window (a refresh carries no time over there, so the game
+-- never opens one): the glow is off whatever is saved, and its options are not built.
+ns.NP_PANDEMIC_NONE = EllesmereUI.IS_FOREVER == true
 function ns.GetPandemicGlow()
+    if ns.NP_PANDEMIC_NONE then return false end
     local v = p and p.pandemicGlow
     if v == nil then v = defaults.pandemicGlow end
     return v == true
@@ -314,12 +318,15 @@ function ns.LayoutCastBar(plate, footprintW, castH)
     -- Snap to whole physical pixels at the plate's own scale (nameplates have their own scale
     -- stack, not UIParent's) so the health-bottom/cast-top gap stays constant instead of
     -- oscillating +/-1px as the plate slides to fractional screen positions.
-    if offsetY ~= 0 and PP then
+    local offsetX = ns.GetCastBarOffsetX()
+    if (offsetY ~= 0 or offsetX ~= 0) and PP then
         local plateES = plate:GetEffectiveScale()
         local onePx = (plateES and plateES > 0) and (PP.perfect / plateES) or (PP.mult or 1)
         offsetY = math.floor(offsetY / onePx + 0.5) * onePx
+        offsetX = math.floor(offsetX / onePx + 0.5) * onePx
     end
-    plate.cast:SetPoint("TOPLEFT", plate.health, "BOTTOMLEFT", shiftX, offsetY)
+    plate._castOffsetX = offsetX
+    plate.cast:SetPoint("TOPLEFT", plate.health, "BOTTOMLEFT", shiftX + offsetX, offsetY)
     -- The cast bar's bottom edge below the health bar's: the bottom text slots
     -- drop by this while a cast shows (PlaceSlotText). Clamped at 0, so a cast
     -- bar raised above the health bar never lifts them.
@@ -359,12 +366,14 @@ function ns.LayoutCastIcon(plate, castH)
         -- size: anchored to the same points the health/cast borders use, they pixel-snap
         -- together and shift as ONE unit instead of rounding independently. SetWidth keeps it
         -- square (height is fixed by the top/bottom anchors = side).
+        -- The top corner follows the cast bar's X offset, as the bottom one does.
         icon:SetWidth(side)
+        local barX = plate._castOffsetX or 0
         if onRight then
-            icon:SetPoint("TOPLEFT", plate.health, "TOPRIGHT", xOff, yOff)
+            icon:SetPoint("TOPLEFT", plate.health, "TOPRIGHT", xOff + barX, yOff)
             icon:SetPoint("BOTTOMLEFT", plate.cast, "BOTTOMRIGHT", xOff, yOff)
         else
-            icon:SetPoint("TOPRIGHT", plate.health, "TOPLEFT", xOff, yOff)
+            icon:SetPoint("TOPRIGHT", plate.health, "TOPLEFT", xOff + barX, yOff)
             icon:SetPoint("BOTTOMRIGHT", plate.cast, "BOTTOMLEFT", xOff, yOff)
         end
     else
@@ -376,6 +385,9 @@ function ns.LayoutCastIcon(plate, castH)
             icon:SetPoint("TOPRIGHT", plate.cast, "TOPLEFT", xOff, yOff)
         end
     end
+    -- A cast glow art showing on this plate goes around the icon (the cast file, which loads
+    -- after this one).
+    if ns.NP_PlaceCastGlowArt then ns.NP_PlaceCastGlowArt(plate) end
 end
 
 -- How far the cast icon protrudes past the bar edge, plus that side ("left"/"right"). The
@@ -483,10 +495,6 @@ local function GetRaidMarkerSize()
     return ns.NP_ElementSize("raidmarker")
 end
 ns.GetRaidMarkerSize = GetRaidMarkerSize
-local function GetRaidMarkerYOffset()
-    return 0
-end
-ns.GetRaidMarkerYOffset = GetRaidMarkerYOffset
 local function GetClassificationSlot()
     return (p and p.classificationSlot) or defaults.classificationSlot
 end
@@ -1324,6 +1332,31 @@ end
 function ns.GetClassPowerBorderSize()
     return (p and p.classPowerBorderSize) or defaults.classPowerBorderSize
 end
+function ns.GetClassPowerEnergyBar()
+    local v = p and p.classPowerEnergyBar
+    if v == nil then return defaults.classPowerEnergyBar end
+    return v
+end
+function ns.GetClassPowerEnergyHeight()
+    return (p and p.classPowerEnergyHeight) or defaults.classPowerEnergyHeight
+end
+function ns.GetClassPowerEnergyWidth()
+    return (p and p.classPowerEnergyWidth) or defaults.classPowerEnergyWidth
+end
+function ns.GetClassPowerEnergyAnchor()
+    return (p and p.classPowerEnergyAnchor) or defaults.classPowerEnergyAnchor
+end
+function ns.GetClassPowerEnergyXOffset()
+    return (p and p.classPowerEnergyXOffset) or defaults.classPowerEnergyXOffset
+end
+function ns.GetClassPowerEnergyYOffset()
+    return (p and p.classPowerEnergyYOffset) or defaults.classPowerEnergyYOffset
+end
+function ns.GetClassPowerEnergyHideFull()
+    local v = p and p.classPowerEnergyHideFull
+    if v == nil then return defaults.classPowerEnergyHideFull end
+    return v
+end
 local function IsBorderEnabled()
     -- The stock styles carry their own art instead of an EUI border: the
     -- stock background art (Blizzard Style), the vanilla border sheets
@@ -1541,6 +1574,29 @@ function ns.GetWrapBorderCastbar()
     if v == nil then return defaults.wrapBorderCastbar end
     return v
 end
+-- Whether Wrap Around Castbar can draw: the setting is on and there is a border to wrap
+-- (Basic or Custom). Neither stock style has one, and neither has Border None.
+function ns.NP_WrapCanDraw()
+    return (ns.GetWrapBorderCastbar() and (IsBorderEnabled() or ns.IsCustomBorderEnabled())) and true or false
+end
+-- Cast Bar X Offset; 0 while the border can wrap the cast bar (the wrap spans the health
+-- bar's width). A saved wrap that cannot draw holds nothing back.
+function ns.GetCastBarOffsetX()
+    if ns.NP_WrapCanDraw() then return 0 end
+    return (p and p.castBarOffsetX) or defaults.castBarOffsetX
+end
+-- Places the cast bars and cast icons again, for a setting that only moves the cast bar:
+-- each live plate at its cast bar's own height (a focus plate keeps its Focus Cast Height),
+-- pooled plates at their next spawn (the appearance pass).
+function ns.NP_RelayoutCastBars()
+    ns._npAppearanceGen = (ns._npAppearanceGen or 0) + 1
+    local barW = ns.GetHealthBarWidth()
+    for _, plate in pairs(ns.plates) do
+        local castH = plate.cast:GetHeight()
+        ns.LayoutCastBar(plate, barW, castH)
+        ns.LayoutCastIcon(plate, castH)
+    end
+end
 local function GetAuraSlots()
     local ds = (p and p.debuffSlot) or defaults.debuffSlot
     local bs = (p and p.buffSlot)   or defaults.buffSlot
@@ -1571,6 +1627,9 @@ function ns.ApplySlotStrata(plate)
     end
     if plate.classFrame then
         plate.classFrame:SetFrameStrata(StrataFor(GetClassificationSlot()))
+    end
+    if plate.questFrame then
+        plate.questFrame:SetFrameStrata(StrataFor(GetClassificationSlot()))
     end
     if plate.factionFrame then
         plate.factionFrame:SetFrameStrata(StrataFor(ns.NP_GetFactionSlot()))
@@ -1841,7 +1900,7 @@ local function PlaceArrow(plate, arrow, side, extent, aw, ah)
 end
 
 -- Position target arrows outside the side elements they meet: the cast icon, the side-slot
--- icons (raid marker, classification, faction, Quest Objective Text) and a side aura row. An
+-- icons (raid marker, Elite/Rare and Quest indicators, faction, Quest Objective Text) and a side aura row. An
 -- element its slot's Y offset moved clear of the arrows (above or below them) is passed over.
 local function PositionArrowsOutsideAuras(plate)
     if not plate.leftArrow then return end
@@ -1859,21 +1918,28 @@ local function PositionArrowsOutsideAuras(plate)
         local r = ArrowSideReach(plate, rmPos, ry, GetRaidMarkerSize(), rx, ah)
         if rmPos == "left" then leftExtent = math.max(leftExtent, r) else rightExtent = math.max(rightExtent, r) end
     end
-    -- The Rare/Quest icon at the size its update set (elite/rare mark or quest icon).
+    -- The elite/rare mark and the quest icon, each at the size its update set.
     local clSlot = GetClassificationSlot()
-    local cf = plate.classFrame
-    if (clSlot == "left" or clSlot == "right") and cf and cf:IsShown() then
+    if clSlot == "left" or clSlot == "right" then
         local cx, cy = GetAuraSlotOffsets("classification")
-        local r = ArrowSideReach(plate, clSlot, cy, cf._npSz or GetRareEliteIconSize(), cx, ah)
+        local cf, qi = plate.classFrame, plate.questFrame
+        local r = 0
+        if cf and cf:IsShown() then
+            r = ArrowSideReach(plate, clSlot, cy, cf._npSz or GetRareEliteIconSize(), cx, ah)
+        end
+        if qi and qi:IsShown() then
+            r = math.max(r, ArrowSideReach(plate, clSlot, cy, qi._npSz or GetRareEliteIconSize(), cx, ah))
+        end
         if clSlot == "left" then leftExtent = math.max(leftExtent, r) else rightExtent = math.max(rightExtent, r) end
     end
     -- The faction badge (its own, or Rare/Quest + Faction, stacked higher behind a showing
-    -- Rare/Quest icon as UpdateFaction places it).
+    -- indicator as UpdateFaction places it).
     local fcSlot = ns.NP_GetFactionSlot()
     if (fcSlot == "left" or fcSlot == "right") and plate.factionFrame and plate.factionFrame:IsShown() then
         local fx, fy = GetSlotOffsets(fcSlot)
-        if p and p.classificationIncludeFaction and cf:IsShown() then
-            fy = fy + math.floor((cf._npSz or GetRareEliteIconSize()) * 0.6 + 0.5)
+        local ride = p and p.classificationIncludeFaction and ns.NP_RideFrame(plate)
+        if ride then
+            fy = fy + math.floor((ride._npSz or GetRareEliteIconSize()) * 0.6 + 0.5)
         end
         local r = ArrowSideReach(plate, fcSlot, fy, ns.NP_GetFactionIconSize(), fx, ah)
         if fcSlot == "left" then leftExtent = math.max(leftExtent, r) else rightExtent = math.max(rightExtent, r) end

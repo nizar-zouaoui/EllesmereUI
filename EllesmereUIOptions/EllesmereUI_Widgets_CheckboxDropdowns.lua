@@ -1213,11 +1213,13 @@ function EllesmereUI.BuildVisOptsCBDropdown(parentFrame, ddW, fLevel, items, get
     end
     ddBtn:SetScript("OnEnter", function()
         ApplyHover()
+        if not (menu and menu:IsShown()) then EllesmereUI._widgetInternals.ShowDropdownTip(ddBtn, ddLbl) end
     end)
     ddBtn:SetScript("OnLeave", function()
         if not (menu and menu:IsShown()) then
             ApplyNormal()
         end
+        EllesmereUI._widgetInternals.HideDropdownTip(ddBtn)
     end)
 
     local function ShowMenu()
@@ -1291,6 +1293,7 @@ function EllesmereUI.BuildVisOptsCBDropdown(parentFrame, ddW, fLevel, items, get
             if EllesmereUI._openDropdownMenu == self then EllesmereUI._openDropdownMenu = nil end
             if ddBtn:IsMouseOver() then
                 ApplyHover()
+                EllesmereUI._widgetInternals.ShowDropdownTip(ddBtn, ddLbl)
             else
                 ApplyNormal()
             end
@@ -1301,7 +1304,7 @@ function EllesmereUI.BuildVisOptsCBDropdown(parentFrame, ddW, fLevel, items, get
         if menu._padFocus and EllesmereUI.PadCursorShown() then menu._padFocus() end
     end
 
-    ddBtn:SetScript("OnClick", function() ShowMenu() end)
+    ddBtn:SetScript("OnClick", function() EllesmereUI._widgetInternals.HideDropdownTip(ddBtn); ShowMenu() end)
     ddBtn:HookScript("OnHide", function() if menu then menu:Hide() end end)
 
     -- RefreshAll(true), opt-in: a dynamic list is read again first, so the summary
@@ -1561,7 +1564,8 @@ end
 --  opts = {
 --      setOrder = function(orderedMovableKeys),  -- fired on every drop
 --      onClose  = function(orderChanged),        -- fired once per menu close
---      hint     = "Drag to Reorder",             -- text above the rows
+--      hint     = "Drag to Reorder",             -- text above the rows (unset with every row fixed:
+--                                                --   no hint line and no divider, a plain checklist)
 --      grip     = true,                          -- a three-dash drag handle on each movable row
 --      hint2    = "...",                         -- optional second hint line
 --      canReorder = function() -> boolean,       -- optional drag guard
@@ -1651,8 +1655,12 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
     local allRows = {}
 
     local ITEM_H = 28
-    local HINT_H = opts.hint2 and 32 or 18
     local DIV_H = 7
+    -- A list with nothing to drag and no hint of its own is a plain checklist:
+    -- no hint line, and no divider above its (all fixed) rows
+    local hasHint = opts.hint ~= nil or opts.hint2 ~= nil or #movable > 0
+    local HINT_H = (not hasHint) and 0 or (opts.hint2 and 32 or 18)
+    local FIXED_DIV = hasHint and DIV_H or 0
 
     local function EnsureMenu()
         if menu then return end
@@ -1660,7 +1668,7 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
         local TAIL_H = (#tail > 0) and (DIV_H + #tail * ITEM_H) or 0
         local ROWS_BASE_Y = -4 - HEAD_H - HINT_H
         local menuH = 4 + HEAD_H + HINT_H + #movable * ITEM_H
-            + ((#fixedItems > 0) and (DIV_H + #fixedItems * ITEM_H) or 0) + TAIL_H + 4
+            + ((#fixedItems > 0) and (FIXED_DIV + #fixedItems * ITEM_H) or 0) + TAIL_H + 4
         -- One menu per dropdown button for the session: a build that dresses the
         -- button again gets this frame back here, reset to new.
         menu = PoolKept(ddBtn, "reorderMenu", "Frame", EllesmereUI.OverlayParent())
@@ -1683,20 +1691,22 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
         end
 
         -- Hint line(s) above the rows
-        local hint = menu:CreateFontString(nil, "OVERLAY")
-        hint:SetFont(fontPath, 10, "")
-        hint:SetTextColor(1, 1, 1, 0.25)
-        if opts.hint2 then
-            hint:SetPoint("TOP", menu, "TOP", 0, -6 - HEAD_H)
-            local hint2 = menu:CreateFontString(nil, "OVERLAY")
-            hint2:SetFont(fontPath, 9, "")
-            hint2:SetTextColor(1, 1, 1, 0.25)
-            hint2:SetPoint("TOP", hint, "BOTTOM", 0, -3)
-            hint2:SetText(EllesmereUI.L(opts.hint2))
-        else
-            hint:SetPoint("TOP", menu, "TOP", 0, -4 - HEAD_H - (HINT_H - 10) / 2)
+        if hasHint then
+            local hint = menu:CreateFontString(nil, "OVERLAY")
+            hint:SetFont(fontPath, 10, "")
+            hint:SetTextColor(1, 1, 1, 0.25)
+            if opts.hint2 then
+                hint:SetPoint("TOP", menu, "TOP", 0, -6 - HEAD_H)
+                local hint2 = menu:CreateFontString(nil, "OVERLAY")
+                hint2:SetFont(fontPath, 9, "")
+                hint2:SetTextColor(1, 1, 1, 0.25)
+                hint2:SetPoint("TOP", hint, "BOTTOM", 0, -3)
+                hint2:SetText(EllesmereUI.L(opts.hint2))
+            else
+                hint:SetPoint("TOP", menu, "TOP", 0, -4 - HEAD_H - (HINT_H - 10) / 2)
+            end
+            hint:SetText(EllesmereUI.L(opts.hint or "Drag to Reorder"))
         end
-        hint:SetText(EllesmereUI.L(opts.hint or "Drag to Reorder"))
 
         -- A plain row (head or tail): its label alone; its callback runs before
         -- the menu closes, so onClose sees the pick. A tail row shows the
@@ -1870,21 +1880,23 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
 
         -- Divider + fixed (non-draggable) rows below the movable group
         if #fixedItems > 0 then
-            local divY = ROWS_BASE_Y - #movable * ITEM_H - 3
-            local dl = menu:CreateTexture(nil, "ARTWORK")
-            dl:SetHeight(1)
-            dl:SetPoint("TOPLEFT", menu, "TOPLEFT", 10, divY)
-            dl:SetPoint("TOPRIGHT", menu, "TOPRIGHT", -10, divY)
-            dl:SetColorTexture(1, 1, 1, 0.08)
+            if FIXED_DIV > 0 then
+                local divY = ROWS_BASE_Y - #movable * ITEM_H - 3
+                local dl = menu:CreateTexture(nil, "ARTWORK")
+                dl:SetHeight(1)
+                dl:SetPoint("TOPLEFT", menu, "TOPLEFT", 10, divY)
+                dl:SetPoint("TOPRIGHT", menu, "TOPRIGHT", -10, divY)
+                dl:SetColorTexture(1, 1, 1, 0.08)
+            end
             for i = 1, #fixedItems do
-                BuildRow(fixedItems[i], ROWS_BASE_Y - #movable * ITEM_H - DIV_H - (i - 1) * ITEM_H, false)
+                BuildRow(fixedItems[i], ROWS_BASE_Y - #movable * ITEM_H - FIXED_DIV - (i - 1) * ITEM_H, false)
             end
         end
 
         -- Divider + plain tail rows at the bottom
         if #tail > 0 then
             local tailTop = ROWS_BASE_Y - #movable * ITEM_H
-                - ((#fixedItems > 0) and (DIV_H + #fixedItems * ITEM_H) or 0)
+                - ((#fixedItems > 0) and (FIXED_DIV + #fixedItems * ITEM_H) or 0)
             local td = menu:CreateTexture(nil, "ARTWORK")
             td:SetHeight(1)
             td:SetPoint("TOPLEFT", menu, "TOPLEFT", 10, tailTop - 3)
@@ -1934,6 +1946,7 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
             -- Controller cursor: back onto the dropdown button before onClose, so a
             -- prompt it opens can still take the cursor (a no-op once the button is hidden).
             if EllesmereUI.PadCursorShown() then EllesmereUI.PadFocus(ddBtn) end
+            if ddBtn:IsMouseOver() then EllesmereUI._widgetInternals.ShowDropdownTip(ddBtn, ddLbl) end
             local changed = orderChanged
             orderChanged = false
             if opts.onClose then opts.onClose(changed) end
@@ -1955,9 +1968,13 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
         ddBrd:SetColor(1, 1, 1, EllesmereUI.DD_BRD_HA)
         ddBg:SetColorTexture(EllesmereUI.DD_BG_R, EllesmereUI.DD_BG_G, EllesmereUI.DD_BG_B, EllesmereUI.DD_BG_HA)
     end
-    ddBtn:SetScript("OnEnter", ApplyHover)
+    ddBtn:SetScript("OnEnter", function()
+        ApplyHover()
+        if not (menu and menu:IsShown()) then EllesmereUI._widgetInternals.ShowDropdownTip(ddBtn, ddLbl) end
+    end)
     ddBtn:SetScript("OnLeave", function()
         if not (menu and menu:IsShown()) then ApplyNormal() end
+        EllesmereUI._widgetInternals.HideDropdownTip(ddBtn)
     end)
 
     local function ShowMenu()
@@ -1980,7 +1997,7 @@ function EllesmereUI.BuildReorderCBDropdown(parentFrame, ddW, fLevel, items, get
         -- Controller cursor: into the opened list.
         if EllesmereUI.PadCursorShown() then EllesmereUI.PadFocus(menu) end
     end
-    ddBtn:SetScript("OnClick", ShowMenu)
+    ddBtn:SetScript("OnClick", function() EllesmereUI._widgetInternals.HideDropdownTip(ddBtn); ShowMenu() end)
     ddBtn:HookScript("OnHide", function() if menu then menu:Hide() end end)
 
     local function RefreshAll()
@@ -2135,6 +2152,7 @@ function EllesmereUI.BuildSliderDropdown(parentFrame, ddW, fLevel, items, opts)
             self:SetScript("OnUpdate", nil)
             if EllesmereUI._openDropdownMenu == self then EllesmereUI._openDropdownMenu = nil end
             Paint(ddBtn:IsMouseOver())
+            if ddBtn:IsMouseOver() then EllesmereUI._widgetInternals.ShowDropdownTip(ddBtn, ddLbl) end
             -- Controller cursor: back onto the button (a no-op once that is hidden too).
             if EllesmereUI.PadCursorShown() then EllesmereUI.PadFocus(ddBtn) end
         end)
@@ -2182,11 +2200,15 @@ function EllesmereUI.BuildSliderDropdown(parentFrame, ddW, fLevel, items, opts)
         end)
         if EllesmereUI.PadCursorShown() then EllesmereUI.PadFocus(menu) end
     end
-    ddBtn:SetScript("OnEnter", function() Paint(true) end)
+    ddBtn:SetScript("OnEnter", function()
+        Paint(true)
+        if not (menu and menu:IsShown()) then EllesmereUI._widgetInternals.ShowDropdownTip(ddBtn, ddLbl) end
+    end)
     ddBtn:SetScript("OnLeave", function()
         if not (menu and menu:IsShown()) then Paint(false) end
+        EllesmereUI._widgetInternals.HideDropdownTip(ddBtn)
     end)
-    ddBtn:SetScript("OnClick", ShowMenu)
+    ddBtn:SetScript("OnClick", function() EllesmereUI._widgetInternals.HideDropdownTip(ddBtn); ShowMenu() end)
     ddBtn:HookScript("OnHide", function() if menu then menu:Hide() end end)
 
     local function RefreshAll()

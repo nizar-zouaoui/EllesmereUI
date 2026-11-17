@@ -131,7 +131,7 @@ initFrame:SetScript("OnEvent", function(self)
                   if EUI._applyPersistSignupNote then EUI._applyPersistSignupNote() end
                   EUI:RefreshPage()
               end });  y = y - h
-        if not EUI._prebuilding then
+        do
             EUI.BuildInlineCog(noteRow._rightRegion, {
                 gap = 9, tip = "Edit the saved signup note.",
                 disabled = function() return not (EllesmereUIDB and EllesmereUIDB.persistSignupNote) end,
@@ -158,7 +158,10 @@ initFrame:SetScript("OnEvent", function(self)
               tooltip = "At the application limit, clicking a group cancels your oldest pending application so you can sign up.",
               getValue = function() return ns.Cfg().cancelOldest == true end,
               setValue = function(v) ns.Cfg().cancelOldest = v and true or false end },
-            EUI.BlankRowCfg());  y = y - h
+            { type = "toggle", text = "Cancel Mismatched Applications",
+              tooltip = "Cancels a pending application that no longer matches your filters, on your next click in the list.",
+              getValue = function() return ns.Cfg().autoCancelMismatch == true end,
+              setValue = function(v) ns.Cfg().autoCancelMismatch = v and true or nil end });  y = y - h
         if PGFLoaded() then
             _, h = W:DualRow(parent, y,
                 { type = "label", text = EUI.COLOR_CODES.ERROR
@@ -227,18 +230,23 @@ initFrame:SetScript("OnEvent", function(self)
         -- status color: a checklist, one color each
         local LINE_ITEMS = {
             { key = "lineDelisted",  label = "Delisted", tooltip = "The group was delisted." },
-            { key = "lineAccepted",  label = "Accepted", tooltip = "Applied and waiting, or invited." },
+            { key = "lineSigned",    label = "Signed Up", tooltip = "You applied and are waiting for an answer." },
+            { key = "lineAccepted",  label = "Accepted", tooltip = "The group invited you." },
             { key = "lineCancelled", label = "Canceled", tooltip = "You cancelled the application." },
             { key = "lineDeclined",  label = "Declined", tooltip = "Declined, the group filled, or the application timed out." },
+            { key = "lineMismatch",  label = "No Longer Matches", tooltip = "Signed up, but the group no longer matches your filters." },
         }
+        for _, it in ipairs(LINE_ITEMS) do it.fixed = true end  -- a plain checklist, no reordering
         local lineRow
         lineRow, h = W:DualRow(parent, y,
-            -- placeholder, the checklist replaces it
-            { type = "dropdown", text = "Status Effect",
+            { type = "dropdown", text = "Row Highlight",
               tooltip = "Marks the groups you applied to in their status color, with a line under the group or a tinted row.",
-              values = { __placeholder = "..." }, order = { "__placeholder" },
-              getValue = function() return "__placeholder" end,
-              setValue = function() end },
+              values = { none = "None", underline = "Underline", row = "Full Row" }, order = { "none", "underline", "row" },
+              getValue = function()
+                  local v = ns.OwnListGet("statusStyle")
+                  return (v == "row" or v == "none") and v or "underline"
+              end,
+              setValue = function(v) ns.SetOwnListValue("statusStyle", v) end },
             { type = "dropdown", text = "Results Visibility",
               tooltip = "Groups your filters leave out: hidden from the list, or shown dimmed.",
               values = { dimmed = "Dimmed", hidden = "Hidden" }, order = { "dimmed", "hidden" },
@@ -249,17 +257,8 @@ initFrame:SetScript("OnEvent", function(self)
                   if ns.DimFiltersChanged then ns.DimFiltersChanged() end
               end })
         y = y - h
-        if not EUI._prebuilding then
+        do
             local rgn = lineRow._leftRegion
-            if rgn._control then rgn._control:Hide() end
-            local dd, ddRefresh = EUI.BuildVisOptsCBDropdown(
-                rgn, 210, rgn:GetFrameLevel() + 2, LINE_ITEMS,
-                function(key) return ns.OwnListGet(key) ~= false end,
-                function(key, v) ns.SetOwnListValue(key, v and true or false) end)
-            EUI.PanelPP.Point(dd, "RIGHT", rgn, "RIGHT", -20, 0)
-            rgn._control = dd
-            rgn._lastInline = nil
-            EUI.RegisterWidgetRefresh(ddRefresh)
             -- the effect's style and each status's color (the list's own
             -- colors and keys: ns.STATUS_LINES, EUI_GroupFinder_ResultsList.lua)
             local function Picker(key, label)
@@ -273,16 +272,21 @@ initFrame:SetScript("OnEvent", function(self)
                     set = function(r, g, b) ns.SetOwnListValue(line[5], { r = r, g = g, b = b }) end }
             end
             EUI.BuildInlineCog(rgn, {
-                title = "Status Effect",
+                title = "Row Highlight",
+                openUp = true,  -- a tall menu: up into the page, not off its bottom
                 rows = {
-                    { type = "dropdown", label = "Style",
-                      values = { underline = "Underline", row = "Row Highlight" }, order = { "underline", "row" },
-                      get = function() return ns.OwnListGet("statusStyle") == "row" and "row" or "underline" end,
-                      set = function(v) ns.SetOwnListValue("statusStyle", v) end },
+                    { type = "reordercheck", label = "Visibility", items = LINE_ITEMS,
+                      get = function(key) return ns.OwnListGet(key) ~= false end,
+                      set = function(key, v) ns.SetOwnListValue(key, v and true or false) end },
                     Picker("lineDelisted", "Delisted Color"),
+                    { type = "slider", label = "Delisted Opacity", min = 0, max = 100, step = 5,
+                      get = function() return tonumber(ns.OwnListGet("delistedOpacity")) or 50 end,
+                      set = function(v) ns.SetOwnListValue("delistedOpacity", v) end },
+                    Picker("lineSigned", "Signed Up Color"),
                     Picker("lineAccepted", "Accepted Color"),
                     Picker("lineCancelled", "Canceled Color"),
                     Picker("lineDeclined", "Declined Color"),
+                    Picker("lineMismatch", "No Longer Matches Color"),
                 },
             })
         end
@@ -301,7 +305,7 @@ initFrame:SetScript("OnEvent", function(self)
               tooltip = "Group tooltips add each member's name (dungeons and arenas, where Blizzard already lists the roles and classes), or a line per member with role, specialization, class and name (other groups).",
               getValue = function() return ns.Cfg().classTooltip ~= false end,
               setValue = function(v) ns.Cfg().classTooltip = v and true or false end });  y = y - h
-        if not EUI._prebuilding then
+        do
             -- the rating text shows with the game's colors too, so the cog stays
             -- open without Raider.IO
             EUI.BuildInlineCog(rioRow._leftRegion, {
@@ -376,14 +380,19 @@ initFrame:SetScript("OnEvent", function(self)
                   ns.SetOwnListValue("missingIcons", v)
                   if ns.Redecorate then ns.Redecorate() end  -- blizzard's list too
               end },
-            { type = "toggle", text = "Row Art",
-              tooltip = "The instance's art across the left half of each group, fading out to the right.",
-              getValue = function() return ns.Cfg().extraRowArt == true end,
-              setValue = function(v)
-                  ns.Cfg().extraRowArt = v and true or false
-                  if ns.GFRetagRows then ns.GFRetagRows() end
-              end })
+            { type = "dropdown", text = "Raid Role Icons",
+              tooltip = "The tank, healer and damage circles on raid groups.",
+              values = { ellesmere = "EllesmereUI", blizzard = "Blizzard" }, order = { "ellesmere", "blizzard" },
+              getValue = function() return ns.OwnListGet("raidRoleIcons") end,
+              setValue = function(v) ns.SetOwnListValue("raidRoleIcons", v) end })
         y = y - h
+        local rowArtCfg = { type = "toggle", text = "Row Art",
+            tooltip = "The instance's art across the left half of each group, fading out to the right.",
+            getValue = function() return ns.Cfg().extraRowArt == true end,
+            setValue = function(v)
+                ns.Cfg().extraRowArt = v and true or false
+                if ns.GFRetagRows then ns.GFRetagRows() end
+            end }
         local function Shown(key, default)
             local v = ns.Cfg()[key]
             if v == nil then v = ns.DEFAULTS[key] end
@@ -433,10 +442,12 @@ initFrame:SetScript("OnEvent", function(self)
             tooltip = "Shows each group's note on a line under it; hover the group for the whole note.",
             getValue = function() return ns.OwnListGet("groupNotes") == true end,
             setValue = function(v) ns.SetOwnListValue("groupNotes", v and true or false) end }
+        -- Row Art closes the section, so a blank slot only ever sits in its last row
         if tagsCfg then
-            _, h = W:DualRow(parent, y, tagsCfg, notesCfg)
+            _, h = W:DualRow(parent, y, tagsCfg, notesCfg); y = y - h
+            _, h = W:DualRow(parent, y, rowArtCfg, EUI.BlankRowCfg())
         else
-            _, h = W:DualRow(parent, y, notesCfg, EUI.BlankRowCfg())
+            _, h = W:DualRow(parent, y, notesCfg, rowArtCfg)
         end
         y = y - h
 

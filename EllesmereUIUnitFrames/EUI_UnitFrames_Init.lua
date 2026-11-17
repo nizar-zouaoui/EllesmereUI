@@ -27,6 +27,40 @@ local UnitFrame_OnEnter, UnitFrame_OnLeave = I.UnitFrame_OnEnter, I.UnitFrame_On
 local db
 I.dbSetters[#I.dbSetters + 1] = function(v) db = v end
 
+-- The Rested Indicator's settings follow profiles: this module's profile holds them
+-- (profile.restedIndicator, a sparse table under the names the account-wide keys had), and
+-- a profile that never set one reads the account-wide value saved before. The options row,
+-- shared by the Unit Frames and Quality of Life pages, reads and writes through these two.
+function EllesmereUI.RestedGet(k)
+    local p = db and db.profile
+    local t = p and p.restedIndicator
+    if t and t[k] ~= nil then return t[k] end
+    return EllesmereUIDB and EllesmereUIDB[k]
+end
+function EllesmereUI.RestedSet(k, v)
+    local p = db and db.profile
+    if not p then
+        if not EllesmereUIDB then EllesmereUIDB = {} end
+        EllesmereUIDB[k] = v
+        return
+    end
+    local t = p.restedIndicator
+    if not t then
+        t = {}
+        p.restedIndicator = t
+    end
+    t[k] = v
+end
+local RestedGet = EllesmereUI.RestedGet
+-- A profile switch: the indicator takes the shown profile's spot and style.
+function EllesmereUI._applyRestedIndicator()
+    local pf = frames.player
+    if pf and pf._restPlace then
+        pf._restPlace()
+        pf._restUpdate()
+    end
+end
+
 local function InitializeFrames()
     -- The engine's shared class and power colors from the suite palette, before any
     -- frame spawns. Only the sync: a full colors pass here would repaint every module
@@ -178,8 +212,10 @@ local function InitializeFrames()
     -- (Combat indicator overlay moved below the target/focus spawns -- the
     -- target frame does not exist yet at this point in the setup.)
 
-    -- Rested indicator on player health bar top-left: "ZZZ" text, or
-    -- Blizzard's animated player frame rest icon when Animated is on.
+    -- Rested indicator on the player frame: "ZZZ" text on the health bar's
+    -- top-left, or Blizzard's animated player frame rest icon when Animated is
+    -- on (the same spot; under the WoW Forever look's player art the stock
+    -- frame's own spot above the portrait, with its gold resting glow).
     do
         local pf = frames.player
         if pf and pf.Health then
@@ -192,29 +228,79 @@ local function InitializeFrames()
                 restText:Hide()
                 pf._restText = restText
 
-                local function PlaceRest(region)
-                    local rx = (EllesmereUIDB and EllesmereUIDB.restedIndicatorXOffset) or 0
-                    local ry = (EllesmereUIDB and EllesmereUIDB.restedIndicatorYOffset) or 0
+                -- The cog's X / Y offsets.
+                local function RestOffsets()
+                    return RestedGet("restedIndicatorXOffset") or 0, RestedGet("restedIndicatorYOffset") or 0
+                end
+                -- Anchor Portrait: the shown portrait backdrop, else nil (the health bar).
+                local function RestPortrait()
+                    if RestedGet("restedIndicatorAnchor") ~= "portrait" then return nil end
+                    local bd = pf.Portrait and pf.Portrait.backdrop
+                    if bd and bd:IsShown() then return bd end
+                    return nil
+                end
+                local function PlaceRest(region, anchor)
+                    local rx, ry = RestOffsets()
                     region:ClearAllPoints()
-                    region:SetPoint("TOPLEFT", pf.Health, "TOPLEFT", 3 + rx, -2 + ry)
+                    region:SetPoint("TOPLEFT", anchor, "TOPLEFT", 3 + rx, -2 + ry)
                 end
                 -- Places the text, and the animated icon once built, at the cog's X/Y
-                -- offsets (and the icon at its Size).
+                -- offsets (and the icon at its Size). The icon's spot depends on the
+                -- frame's art: the stock layout pass runs this again when that changes
+                -- (ns.UF_RestFollowArt). On the portrait, the text leaves the bar clip
+                -- and both sit above the portrait (a detached one is raised over the
+                -- frame); the passes that show, hide or re-level the portrait run
+                -- this again through _restFollowPortrait.
                 pf._restPlace = function()
-                    PlaceRest(pf._restText)
+                    local bd = RestPortrait()
+                    local host = bd or pf.Health
+                    local holder = pf._restHolder
+                    if holder:GetParent() ~= host then holder:SetParent(host) end
+                    holder:ClearAllPoints()
+                    holder:SetAllPoints(host)
+                    holder:SetFrameLevel(host:GetFrameLevel() + (bd and 10 or 5))
+                    PlaceRest(pf._restText, host)
                     local a = pf._restAnim
                     if a then
-                        local size = (EllesmereUIDB and EllesmereUIDB.restedIndicatorAnimatedSize) or 24
-                        a:SetSize(size, size)
-                        PlaceRest(a)
+                        local size = RestedGet("restedIndicatorAnimatedSize") or 24
+                        local tex = pf._restAnimTex
+                        local clipLevel = (pf._barClip or pf):GetFrameLevel()
+                        if ns.UF_Forever() and pf._blizzGeom == ns.UF_BLIZZ.player then
+                            -- WoW Forever's own PlayerRestLoop: a 20x20 frame at (64, -6) of
+                            -- the stock box, the 30x30 flipbook centred on it. The Size
+                            -- setting scales both, 24 being the stock look. The stock spot
+                            -- is the same for both anchors, one level above the resting glow
+                            -- (the stock portrait sits under the bar clip).
+                            a:SetFrameLevel(clipLevel + 10)
+                            local k = size / 24
+                            local rx, ry = RestOffsets()
+                            a:SetSize(20 * k, 20 * k)
+                            a:ClearAllPoints()
+                            ns.UF_BlizzPoint(a, "TOPLEFT", pf, "TOPLEFT", 64 + rx, -6 + ry, pf._blizzMirror)
+                            tex:ClearAllPoints()
+                            tex:SetPoint("CENTER", a, "CENTER")
+                            tex:SetSize(30 * k, 30 * k)
+                        else
+                            a:SetFrameLevel((bd and bd:GetFrameLevel() or clipLevel) + 10)
+                            a:SetSize(size, size)
+                            PlaceRest(a, host)
+                            tex:ClearAllPoints()
+                            tex:SetAllPoints(a)
+                        end
+                    end
+                end
+                -- For the passes that show, hide or re-level the portrait: only an
+                -- indicator anchored to the portrait has anything to follow.
+                pf._restFollowPortrait = function()
+                    if RestedGet("restedIndicatorAnchor") == "portrait" then
+                        pf._restPlace()
                     end
                 end
 
                 -- Shows the style the settings pick (or neither) and hides the other.
                 -- The animated icon is built the first time it is needed.
                 pf._restUpdate = function()
-                    local db = EllesmereUIDB
-                    local enabled = db and db.showRestedIndicator == true or false
+                    local enabled = RestedGet("showRestedIndicator") == true
                     -- Rest changes are listened to only while the indicator is on.
                     if enabled ~= pf._restListening then
                         pf._restListening = enabled
@@ -227,30 +313,61 @@ local function InitializeFrames()
                         end
                     end
                     local on = enabled and IsResting() or false
-                    local animated = db and db.restedIndicatorAnimated == true or false
+                    local animated = RestedGet("restedIndicatorAnimated") == true
                     if on and animated and not pf._restAnim then
                         -- On the unit frame, not the health bar: the bar sits in the frame's
                         -- bar clip, which would cut off the z's as they float up past its edge.
-                        -- Its level keeps it above that clip, which draws as one group.
+                        -- Its level (set by _restPlace) keeps it above that clip, which
+                        -- draws as one group.
                         local restAnim = CreateFrame("Frame", nil, pf)
-                        restAnim:SetFrameLevel(((pf._barClip or pf):GetFrameLevel()) + 10)
                         restAnim:Hide()
                         local restTex = restAnim:CreateTexture(nil, "OVERLAY")
-                        restTex:SetAllPoints(restAnim)
                         EllesmereUI.AddRestFlipbook(restAnim, restTex)
                         pf._restAnim = restAnim
+                        pf._restAnimTex = restTex
                         pf._restPlace()
                     end
                     pf._restText:SetShown(on and not animated)
                     if pf._restAnim then pf._restAnim:SetShown(on and animated) end
+
+                    -- WoW Forever's stock frame also lights its art while resting: the
+                    -- status glow over the art in gold, pulsing between 55/255 and full
+                    -- alpha over a second (PlayerFrame_UpdateStatus). Rides the animated
+                    -- icon, on the player art only.
+                    local glow = pf._restGlow
+                    local glowOn = on and animated and ns.UF_Forever()
+                        and pf._blizzGeom == ns.UF_BLIZZ.player
+                        and ns.UF_AtlasOK("UI-HUD-UnitFrame-Player-PortraitOn-Status")
+                    if glowOn and not glow then
+                        glow = CreateFrame("Frame", nil, pf)
+                        glow:SetAllPoints(pf)
+                        glow:EnableMouse(false)
+                        local bar = pf._barClip or pf
+                        glow:SetFrameStrata(bar:GetFrameStrata())
+                        glow:SetFrameLevel(bar:GetFrameLevel() + 9)
+                        glow:Hide()
+                        local gt = glow:CreateTexture(nil, "OVERLAY")
+                        UnsnapTex(gt)
+                        ns.UF_StockAtlas(gt, "UI-HUD-UnitFrame-Player-PortraitOn-Status", true)
+                        gt:SetPoint("CENTER", pf, "CENTER", 0, 0)
+                        gt:SetVertexColor(1, 0.88, 0.25)
+                        local pulse = glow:CreateAnimationGroup()
+                        pulse:SetLooping("REPEAT")
+                        local up = pulse:CreateAnimation("Alpha")
+                        up:SetOrder(1); up:SetDuration(0.5); up:SetFromAlpha(55 / 255); up:SetToAlpha(1)
+                        local down = pulse:CreateAnimation("Alpha")
+                        down:SetOrder(2); down:SetDuration(0.5); down:SetFromAlpha(1); down:SetToAlpha(55 / 255)
+                        glow:SetScript("OnShow", function() pulse:Play() end)
+                        glow:SetScript("OnHide", function() pulse:Stop() end)
+                        pf._restGlow = glow
+                    end
+                    if glow then glow:SetShown(glowOn and true or false) end
                 end
 
                 -- Its events are registered by _restUpdate while the indicator is on.
                 pf._restEventFrame = CreateFrame("Frame", nil, pf)
                 pf._restEventFrame:SetScript("OnEvent", function() pf._restUpdate() end)
             end
-            pf._restHolder:SetAllPoints(pf.Health)
-            pf._restHolder:SetFrameLevel(pf.Health:GetFrameLevel() + 5)
             pf._restPlace()
             pf._restUpdate()
         end
